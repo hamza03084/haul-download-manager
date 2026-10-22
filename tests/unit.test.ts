@@ -113,15 +113,27 @@ test('SpeedMeter measures a steady rate and decays when stalled', () => {
 
 test('validateSettings enforces limits', () => {
   const dir = path.resolve('/downloads');
-  // Settings saved by 1.0 have no yt-dlp location and by 1.1 no automatic-tools choice: they stay valid
-  // (automatic detection, tools downloaded automatically).
+  // Settings saved by 1.0 have no yt-dlp location, by 1.1 no automatic-tools choice and by 1.2 none of
+  // the 1.3 values: they stay valid and get the defaults.
   assert.deepEqual(validateSettings({ downloadDirectory: dir, maxConcurrent: 4, resumeOnStartup: false }), {
     downloadDirectory: dir,
     maxConcurrent: 4,
     resumeOnStartup: false,
     ytDlpPath: '',
     autoMediaTools: true,
+    speedLimit: 0,
+    categoriesEnabled: false,
+    startWithWindows: false,
+    closeToTray: false,
   });
+  const base = { downloadDirectory: dir, maxConcurrent: 1, resumeOnStartup: true };
+  assert.equal(validateSettings({ ...base, speedLimit: 512_000 }).speedLimit, 512_000);
+  for (const bad of [-1, 1.5, 'fast', 2 ** 40]) assert.throws(() => validateSettings({ ...base, speedLimit: bad }), ValidationError, `speedLimit ${bad}`);
+  const flags = validateSettings({ ...base, categoriesEnabled: true, startWithWindows: true, closeToTray: true });
+  assert.deepEqual([flags.categoriesEnabled, flags.startWithWindows, flags.closeToTray], [true, true, true]);
+  for (const key of ['categoriesEnabled', 'startWithWindows', 'closeToTray']) {
+    assert.throws(() => validateSettings({ ...base, [key]: 'yes' }), ValidationError, key);
+  }
   assert.equal(validateSettings({ downloadDirectory: dir, maxConcurrent: 1, resumeOnStartup: true, autoMediaTools: false }).autoMediaTools, false);
   assert.throws(() => validateSettings({ downloadDirectory: dir, maxConcurrent: 1, resumeOnStartup: true, autoMediaTools: 'yes' }), ValidationError);
   const yt = path.resolve('/tools/yt-dlp.exe');

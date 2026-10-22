@@ -33,6 +33,11 @@ export interface DownloadRecord {
   completedAt: number | null;
   /** For `media` downloads: what was chosen in the quality picker. */
   media: MediaSpec | null;
+  /**
+   * True while the download still has to be moved into a category subfolder (Video, Music…) of
+   * `directory` once its file name is known. Cleared as soon as that has been done.
+   */
+  autoCategory: boolean;
 }
 
 export interface DownloadView extends DownloadRecord {
@@ -54,9 +59,40 @@ export interface Settings {
   ytDlpPath: string;
   /** Download yt-dlp, FFmpeg and Deno into Haul's own folder when needed, and keep yt-dlp up to date. */
   autoMediaTools: boolean;
+  /** Total download speed limit in bytes per second, shared by all downloads; 0 = no limit. */
+  speedLimit: number;
+  /** Save downloads in a subfolder of the download folder named after their type (Video, Music, …). */
+  categoriesEnabled: boolean;
+  /** Start Haul (hidden in the notification area) when the user signs in to Windows. */
+  startWithWindows: boolean;
+  /** Closing the window keeps Haul running in the notification area instead of quitting. */
+  closeToTray: boolean;
 }
 
 export const MAX_CONCURRENT_LIMIT = 10;
+/** Highest accepted speed limit: 1 GB/s (anything above is "no limit" in practice). */
+export const MAX_SPEED_LIMIT = 1024 * 1024 * 1024;
+
+/** Every setting except the download folder, as on a fresh profile. */
+export const SETTINGS_DEFAULTS: Omit<Settings, 'downloadDirectory'> = {
+  maxConcurrent: 3,
+  resumeOnStartup: true,
+  ytDlpPath: '',
+  autoMediaTools: true,
+  speedLimit: 0,
+  categoriesEnabled: false,
+  startWithWindows: false,
+  closeToTray: false,
+};
+
+/** "Shut down the PC when downloads finish": whether it is armed, and the countdown once everything is done. */
+export interface PowerState {
+  armed: boolean;
+  /** Time (ms since epoch) at which Windows will be shut down, or null while no countdown is running. */
+  shutdownAt: number | null;
+  /** True when this build cannot shut down the PC (not Windows); the option is then hidden. */
+  unavailable: boolean;
+}
 
 // ------------------------------------------------------------------ video pages (yt-dlp)
 
@@ -161,6 +197,8 @@ export interface HaulApi {
   resume(id: string): Promise<ActionResult>;
   retry(id: string): Promise<ActionResult>;
   cancel(id: string): Promise<ActionResult>;
+  /** Replaces the link of a paused, failed or cancelled download (for expired links) and starts it again. */
+  changeUrl(id: string, url: string): Promise<ActionResult<DownloadView>>;
   remove(id: string, deleteFile: boolean): Promise<ActionResult>;
   pauseAll(): Promise<ActionResult>;
   resumeAll(): Promise<ActionResult>;
@@ -180,6 +218,10 @@ export interface HaulApi {
   /** Gets missing tools and checks for a newer yt-dlp now. */
   updateMediaTools(): Promise<ActionResult>;
   onMediaToolsProgress(cb: (s: ToolInstallStatus) => void): () => void;
+  getPower(): Promise<PowerState>;
+  /** Arms or disarms "shut down the PC when downloads finish"; disarming also stops a running countdown. */
+  setShutdownWhenDone(armed: boolean): Promise<ActionResult<PowerState>>;
+  onPowerChanged(cb: (s: PowerState) => void): () => void;
   onDownloadChanged(cb: (d: DownloadView) => void): () => void;
   onDownloadRemoved(cb: (id: string) => void): () => void;
   onAddRequest(cb: (url: string) => void): () => void;

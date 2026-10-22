@@ -2,12 +2,12 @@
 // until the parent kills it abruptly (no graceful shutdown).
 import { DownloadManager } from '../../src/main/engine/manager';
 import { SqliteStore } from '../../src/main/engine/store';
-import type { DownloadView } from '../../src/shared/types';
+import { SETTINGS_DEFAULTS, type DownloadView } from '../../src/shared/types';
 
 const [dbFile, dir, url] = process.argv.slice(2);
 const manager = new DownloadManager({
   store: new SqliteStore(dbFile),
-  defaultSettings: { downloadDirectory: dir, maxConcurrent: 1, resumeOnStartup: true, ytDlpPath: '', autoMediaTools: true },
+  defaultSettings: { ...SETTINGS_DEFAULTS, downloadDirectory: dir, maxConcurrent: 1 },
   progressIntervalMs: 50,
   persistIntervalMs: 100,
 });

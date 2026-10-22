@@ -20,6 +20,11 @@ Haul is an independent project. It is not affiliated with, and contains no code 
 - **Survives crashes, power cuts and Windows shutdowns.** Partial data is flushed to disk every 2 seconds, and the next time you open Haul it continues from the last safe point instead of starting over.
 - **A download queue.** Choose 1–10 downloads at a time; the rest wait their turn. **Resume all**, **Pause all**, filters by status, and search by name or link.
 - **Automatic retries** when the connection drops (up to 3, continuing from the partial file when possible).
+- **Change link.** If a link expired while a download was paused or failed, give it a fresh link: the data downloaded so far is kept and the download continues from there when the new link serves the same file.
+- **Speed limit.** One limit in KB/s shared by all downloads, changeable while they run, so the rest of your connection stays usable.
+- **Sort by type.** Optionally saves downloads into Video, Music, Images, Documents, Programs or Archives subfolders, and a type filter in the list either way.
+- **Notification area icon, start with Windows, keep running in the background.** Haul can start hidden when you sign in, so downloads interrupted by a restart continue by themselves, and can keep downloading after you close its window. Both are off by default.
+- **Shut down the PC when downloads finish**, with a 60-second countdown you can cancel.
 - **YouTube quality picker.** Video with sound at every resolution up to 4K/60 fps, video only, or audio only (M4A original quality or MP3), plus the thumbnail and subtitles if you want them.
 - **No setup for YouTube.** Haul downloads yt-dlp, FFmpeg and Deno from their official GitHub releases, checks every file against its published SHA-256 checksum, and keeps yt-dlp up to date once a day.
 - **Warns about web pages.** If a link returns a login page or an expired-link page instead of the file, the download says so instead of looking finished.
@@ -30,7 +35,7 @@ Haul is an independent project. It is not affiliated with, and contains no code 
 - **Light and dark themes** that follow Windows, and progress on the taskbar icon.
 - **Installer or portable exe.** Neither needs administrator rights.
 
-Planned next: tray icon and start with Windows, changing an expired link, a speed limit, categories, browser download capture, multiple connections per file and more. See [ROADMAP.md](ROADMAP.md).
+Planned next: a scheduler, browser download capture, more video sites, multiple connections per file, proxy support and more. See [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -65,11 +70,46 @@ Release builds are currently **not code-signed** (signing certificates cost mone
    | **Retry** | Starts a failed or cancelled download again. Failed downloads continue from their partial data when possible. |
    | **Open** | Opens the finished file with its default program. |
    | 📁 Show in folder | Opens Explorer with the file selected. |
+   | 🔗 Change link | For paused, failed and cancelled downloads: continue under a fresh link (see [Expired links](#expired-links-change-link)). |
    | ■ Cancel | Stops the download and deletes its partial data. |
    | 🗑 Remove | Removes the entry from the list. For finished downloads you can choose whether to also delete the file. |
 
-   **Resume all**, **Pause all** and **Clear finished** (removes done and cancelled entries from the list; files stay on disk) are above the list. Use the filter chips and the search box to find downloads.
-4. **Settings** (gear icon): default download folder, how many downloads run at the same time (1–10), and whether unfinished downloads continue automatically when Haul starts.
+   **Resume all**, **Pause all**, **Clear finished** (removes done and cancelled entries from the list; files stay on disk) and **Shut down when done** are above the list. Use the filter chips, the type filter (Video, Music, …) and the search box to find downloads.
+4. **Settings** (gear icon): default download folder, how many downloads run at the same time (1–10), the speed limit, sorting by type, whether unfinished downloads continue automatically when Haul starts, starting with Windows, and keeping Haul running in the background when its window is closed.
+
+### Expired links (Change link)
+
+Links copied from a website's player, a cloud drive or a "download now" button often stop working after a while (the server answers **Access denied (HTTP 403)**). If that happens while a download is paused or has failed, get a fresh link from the website, press **🔗 Change link** on the download and paste it. Haul keeps the part it already has and asks the new server for the rest. It continues only if the server confirms it is sending the same file (same size and version tags, see [How pause and resume work](#how-pause-and-resume-work)); otherwise it restarts from the beginning and says so. YouTube downloads have no Change link: remove them and add the new link.
+
+### Speed limit
+
+**Settings → Speed limit** sets one limit in KB/s for all downloads together. It takes effect immediately, also for downloads already running. YouTube downloads get the same limit through yt-dlp, but only when they start: a limit changed while a video is downloading applies to the next video.
+
+### Sorting downloads by type
+
+Turn on **Settings → Sort downloads into folders by type**, and new downloads are saved in a subfolder of your download folder named after their type:
+
+| Folder | File types |
+| --- | --- |
+| Video | mp4, mkv, avi, mov, wmv, flv, webm, m4v, mpg, mpeg, ts, 3gp, ogv |
+| Music | mp3, m4a, flac, wav, aac, ogg, oga, opus, wma, aiff, aif, alac |
+| Images | jpg, jpeg, png, gif, webp, bmp, svg, tif, tiff, heic, avif, ico |
+| Documents | pdf, doc, docx, xls, xlsx, ppt, pptx, txt, rtf, odt, ods, odp, epub, csv, md |
+| Programs | exe, msi, msix, msixbundle, appx, appxbundle, apk, jar, dmg, deb, rpm |
+| Archives | zip, rar, 7z, tar, gz, tgz, bz2, xz, zst, iso, cab, img |
+
+Files of any other type stay in the download folder. When the file name only becomes known from the server's reply, the subfolder is chosen at that moment. Downloads for which you pick a folder yourself (the **›** options in the add bar) are never sorted. Turning the setting off does not move anything. The **type filter** next to the search box works on every download, sorted or not.
+
+### Notification area icon, starting with Windows, running in the background
+
+Haul shows an icon in the Windows notification area (next to the clock; Windows may hide it behind the **^** arrow). Its menu has **Open Haul**, **Resume all**, **Pause all**, **Shut down the PC when downloads finish** and **Quit Haul**; its tooltip shows how many downloads are running and their total speed.
+
+- **Settings → Start Haul when I sign in to Windows** adds Haul to your Windows startup programs (for your Windows account only; you can also turn it off in Task Manager → Startup apps). Haul then starts hidden in the notification area and continues unfinished downloads by itself, so a download interrupted by a restart does not wait for you to open Haul. Click the icon to open the window. This is not available when running from source with `npm start`.
+- **Settings → Keep running in the background when the window is closed** makes the window's close button hide Haul instead of quitting it; downloads continue. Quit from the icon's menu. With this off (the default), closing the window quits Haul as before, and unfinished downloads continue the next time you open it.
+
+### Shut down the PC when downloads finish
+
+Press **Shut down when done** above the list (or tick it in the notification area menu) before leaving the PC. When no download is downloading or waiting any more, Haul shows a 60-second countdown with a **Cancel shutdown** button (and brings its window to the front), then shuts Windows down the same way as **Start → Power → Shut down**: programs with unsaved work can still stop it. Adding or resuming a download during the countdown postpones it until that one has finished too. The choice is not remembered across restarts of Haul.
 
 ### How pause and resume work
 
@@ -80,7 +120,7 @@ Release builds are currently **not code-signed** (signing certificates cost mone
 
 ### What happens if Haul, Windows or the power goes off mid-download
 
-The download continues from where it stopped **the next time you open Haul**. It does not start over, provided the server supports resuming (the **Resumable** tag). Haul is not started automatically with Windows, so open it yourself after a restart.
+The download continues from where it stopped **the next time Haul runs**. It does not start over, provided the server supports resuming (the **Resumable** tag). With **Settings → Start Haul when I sign in to Windows** turned on, that is right after you sign in; otherwise open Haul yourself after a restart.
 
 | What happened | What Haul does next time |
 | --- | --- |
@@ -88,7 +128,7 @@ The download continues from where it stopped **the next time you open Haul**. It
 | Windows shut down, restarted or signed you out | Haul saves each download's progress the moment Windows announces it is ending the session, then continues from there. |
 | Haul crashed, was killed in Task Manager, or the PC lost power or blue-screened | While downloading, Haul flushes the partial file to disk every 2 seconds and records how much is safely stored. It cuts off anything after that point (after a power cut that part can contain zeros instead of real data), then continues from there. You lose at most the last couple of seconds of downloading. |
 | The server does not support resuming (**No resume**) | The download restarts from the beginning, with a note saying so. |
-| The link has expired (common with links copied from a website's player or a cloud drive) | The resume fails with "Access denied (HTTP 403)". Get a fresh link and add it again. |
+| The link has expired (common with links copied from a website's player or a cloud drive) | The resume fails with "Access denied (HTTP 403)". Get a fresh link and press **Change link** on the download: it continues from the partial file. |
 
 Before continuing, Haul always checks that the server is sending the same version of the file (size and ETag/Last-Modified). If anything changed, it starts over rather than joining two different files.
 
@@ -149,6 +189,8 @@ YouTube's Terms of Service allow saving videos only through YouTube's own featur
 
 - **Haul has no telemetry, analytics, accounts or ads.** It connects to the links you add and, for YouTube support, to GitHub: to download yt-dlp, FFmpeg and Deno the first time, and once a day to see whether a newer yt-dlp is out (only the checksum list is fetched unless there is one). Nothing about you or your downloads is sent. Turning off **Settings → YouTube downloads → Get these tools automatically** stops all GitHub connections. For YouTube links, yt-dlp contacts YouTube.
 - Haul itself does not check for updates of Haul.
+- **Settings → Start Haul when I sign in to Windows** writes one value (`electron.app.Haul Download Manager`) under your user's `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key (the same place Task Manager's Startup apps come from). Turning the setting off, or uninstalling, removes it. Nothing else is written to the registry besides the `haul://` link handler.
+- **Shut down when done** runs Windows' own `shutdown.exe /s /t 0` when the countdown ends, nothing else.
 - Everything is stored per Windows user, in `%APPDATA%\Haul Download Manager`:
   - `data\haul.db`: download history and settings (SQLite).
   - `tools`: yt-dlp, FFmpeg and Deno, if Haul downloaded them (`tools.json` records the checksum of each).
@@ -163,7 +205,12 @@ YouTube's Terms of Service allow saving videos only through YouTube's own featur
 | Problem | What to do |
 | --- | --- |
 | "Server not found" / "network is unreachable" | Check your internet connection. Haul does not use the Windows proxy settings yet, so it cannot download on networks that require a proxy (see limitations). |
-| "Access denied (HTTP 403)" or "requires you to sign in (HTTP 401)" | The link needs a browser login or has expired. Download it in the browser, or get a fresh link. |
+| "Access denied (HTTP 403)" or "requires you to sign in (HTTP 401)" | The link needs a browser login or has expired. Download it in the browser, or get a fresh link and press **Change link** on the download. |
+| Downloads are slower than expected | Check **Settings → Speed limit**; the status bar shows "limit …" while one is set. Haul also uses one connection per file (see limitations). |
+| A download went into a `Video`, `Music`, … subfolder | **Settings → Sort downloads into folders by type** is on. Turn it off for new downloads, or pick a folder yourself in the add bar's **›** options. |
+| Haul keeps running after closing its window | **Settings → Keep running in the background when the window is closed** is on. Quit from the notification area icon's menu, or turn the setting off. |
+| "Start Haul when I sign in to Windows" has no effect | It only works for installed or portable builds, not when running from source. If you moved or renamed the portable exe after turning it on, turn it off and on again. Windows lets you disable startup apps in Task Manager → Startup apps; that overrides the setting. |
+| "Windows could not be shut down" | Windows refused the shutdown command (for example a group policy). The message shows the reason; shut down from the Start menu instead. |
 | YouTube: "Could not download yt-dlp / FFmpeg / Deno" | Haul could not reach GitHub. Check your internet connection, then open **Settings → YouTube downloads** and click **Get the tools now**. On networks that block GitHub, install the tools yourself ([The tools it uses](#the-tools-it-uses)). |
 | YouTube: "…did not match the checksum its project publishes" | The download was damaged or changed on the way, so Haul deleted it. Try again later. If it keeps happening, your network may be altering downloads. |
 | YouTube: "YouTube downloads need yt-dlp / FFmpeg, which was not found" | **Get these tools automatically** is turned off in Settings. Turn it on, or install the tools yourself ([The tools it uses](#the-tools-it-uses)) and restart Haul. |
@@ -188,13 +235,16 @@ YouTube's Terms of Service allow saving videos only through YouTube's own featur
 - **One connection per download.** Haul does not split files into parallel segments, so it is not faster than a browser for a single file. Servers that throttle each connection will be slower than in download managers that open many connections.
 - **No proxy support.** System/PAC proxy settings are not used yet.
 - **No login sessions or cookies.** Links that need you to be signed in to a site will fail.
-- **Expired links cannot be refreshed.** If a link stops working while a download is paused, you have to add a fresh link as a new download (the partial data is not reused).
+- **Change link only continues when the new server confirms the same file** (same size and ETag/Last-Modified). Some sites change these for every link, in which case the download restarts from the beginning. YouTube downloads cannot have their link changed.
+- **The speed limit reaches YouTube downloads only when they start.** A limit changed while a video is downloading applies to the next video. It is also a limit per yt-dlp process, so two videos downloading at once can together use twice the limit.
+- **Sorting by type cannot be undone automatically:** turning it off leaves earlier downloads where they are.
 - **HTTP and HTTPS only.** No FTP, BitTorrent/magnet links, or video stream (HLS/DASH) capture.
 - **Resuming needs server support** (byte ranges plus a known file size). Otherwise downloads restart from the beginning, with a note saying so.
-- **Haul does not start with Windows.** Downloads interrupted by a shutdown continue when you next open Haul.
+- **Start with Windows** is not available when running from source (`npm start`), and a moved or renamed portable exe has to be re-registered by turning the setting off and on.
+- **Shut down when done** shuts down (it cannot sleep or hibernate), does not force other programs to close, and the choice is forgotten when Haul quits.
 - **Disk full in the middle of a download** is reported ("The disk is full… the partial download was kept"), but this has only been tested with a simulated free-space check, not on a really full drive.
 - If a server ignores Haul's request for an uncompressed response and sends compressed data anyway, the file is saved exactly as sent (rare).
-- No speed limiter or download scheduler yet.
+- No download scheduler yet.
 - Windows x64 only. The code is cross-platform Electron, but macOS, Linux and Windows on ARM builds have not been built or tested.
 - Release builds are not code-signed (see SmartScreen above).
 
@@ -215,8 +265,8 @@ If `npm start` reports that Electron failed to install, run `node node_modules/e
 | --- | --- |
 | `npm test` | Compiles and runs the unit, integration, crash, power-cut and randomised "impatient user" tests (Node test runner, local HTTP test server; no internet needed). Set `HAUL_CHAOS_SEEDS=30` for a longer randomised soak. |
 | `npm run typecheck` | TypeScript type checking for the main process and the UI. |
-| `npm run e2e` | Drives the real app through its UI with Playwright: add, download, pause/resume, cancel, settings, restart and history. Uses a throwaway profile in `%TEMP%`. Screenshots go to `e2e-output\`. |
-| `node scripts/e2e.mjs --exe "<path to exe>"` | The same end-to-end test against a packaged, installed or portable build. |
+| `npm run e2e` | Drives the real app through its UI with Playwright: add, download, pause/resume, cancel, settings, speed limit, sorting by type, change link, shutdown countdown, notification area, hidden start, restart and history. Uses a throwaway profile in `%TEMP%`. Screenshots go to `e2e-output\`. |
+| `node scripts/e2e.mjs --exe "<path to exe>"` | The same end-to-end test against a packaged, installed or portable build. This variant also turns "start with Windows" on and off again, which briefly registers that exe in your user's Run key. |
 | `node scripts/live-test.mjs --exe "<path to exe>"` | Optional real-internet test of a packaged build. Downloads ~400 MB of public HD videos (Blender open movies), kills the app mid-download, relaunches it, and verifies the files with their built-in CRC checksums. Not run in CI. |
 | `npm run dist` | Builds the installer and portable exe into `release\`. |
 | `npm run dist:dir` | Builds only the unpacked app folder (`release\win-unpacked\`), which is faster for testing. |
@@ -251,6 +301,10 @@ browser-extension/ Optional Chrome/Edge extension
 | `HAUL_DISABLE_PROTOCOL=1` | Do not register the `haul://` link handler. |
 | `HAUL_NO_TOOL_DOWNLOADS=1` | Never download yt-dlp, FFmpeg or Deno (used by the automated tests). |
 | `HAUL_YTDLP_COMMAND` | JSON array, e.g. `["node.exe","dist/tests/fixtures/fakeYtDlp.js"]`: run this instead of yt-dlp (used by the offline end-to-end test). |
+| `HAUL_FAKE_SHUTDOWN=1` | "Shut down when done" only writes a log line instead of shutting down the PC (used by the end-to-end test). |
+| `HAUL_SHUTDOWN_COUNTDOWN_MS` | Length of the shutdown countdown in milliseconds instead of 60000. |
+
+Starting Haul with `--hidden` keeps the window hidden in the notification area; the "start with Windows" entry uses this.
 
 None of these are needed for normal use.
 
@@ -259,6 +313,7 @@ None of these are needed for normal use.
 - The UI runs in a sandboxed renderer with context isolation and a strict Content Security Policy. It cannot access files directly; it asks the main process to act on a download by its ID.
 - Release builds have Electron's hardening fuses enabled: run-as-Node, `NODE_OPTIONS` and Node inspector flags are disabled; ASAR integrity validation and load-app-only-from-ASAR are enabled (check with `npx @electron/fuses read --app "<path to exe>"`).
 - Deliberately kept for testing: the `HAUL_*` environment variables above, and Chromium's standard `--remote-debugging-port` switch (used by the packaged end-to-end test). Both only work for programs already running as your Windows user, which could control the app anyway.
+- "Shut down when done" runs `shutdown.exe` from the Windows folder with fixed arguments (`/s /t 0`) and no command shell; "start with Windows" writes a per-user Run entry pointing at Haul's own exe. Neither needs administrator rights.
 - yt-dlp is started directly (no command shell) with `--ignore-config`, the link after `--`, and only fixed options or values checked against strict patterns, so neither a link nor the UI can add options to its command line. A yt-dlp left running after a crash is stopped before a download continues, so two copies never write the same file.
 - Server-supplied file names are cleaned: no folder parts, no characters Windows forbids, no reserved device names (`CON`, `NUL`, …). Existing files are never overwritten; duplicates become `name (1).ext`.
 - Report security problems privately as described in [SECURITY.md](SECURITY.md).

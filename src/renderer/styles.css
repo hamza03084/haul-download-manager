@@ -529,6 +529,46 @@ input {
 .search {
   width: 190px;
 }
+.category-select {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px;
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+}
+.category-select:focus {
+  border-color: var(--accent);
+}
+.btn-ghost.is-on {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/* speed limit in Settings */
+.limit-field {
+  max-width: 220px;
+  align-items: center;
+}
+.limit-field .unit {
+  color: var(--text-3);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.setting p.hint {
+  margin: 8px 0 0;
+}
+
+/* shutdown countdown */
+.modal.shutdown {
+  border-color: var(--warn);
+}
+.modal.shutdown .countdown {
+  font-size: 22px;
+  color: var(--warn);
+}
 
 /* ---------------------------------------------------------------- list & cards */
 .list {

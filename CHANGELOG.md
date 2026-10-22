@@ -2,6 +2,25 @@
 
 All notable changes to Haul Download Manager are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-10-23
+
+### Added
+- **Notification area icon.** Haul now has an icon in the Windows notification area (tray) with Open, Resume all, Pause all, Shut down the PC when downloads finish, and Quit. Its tooltip shows how many downloads are running and their total speed.
+- **Start Haul when I sign in to Windows** (Settings, off by default). Haul then starts hidden in the notification area and continues unfinished downloads by itself, so a download interrupted by a restart no longer waits for you to open Haul. Registered for the current user only (no administrator rights); the uninstaller removes it.
+- **Keep running in the background when the window is closed** (Settings, off by default). Closing the window hides Haul in the notification area and downloads continue; quit from the icon's menu.
+- **Change link** for paused, failed and cancelled downloads, for links that expired while a download was stopped (common with links copied from a website's player or a cloud drive). The data downloaded so far is kept, and Haul continues from it when the new link serves the same file (same size and version), otherwise it starts over and says so.
+- **Speed limit** (Settings): one limit in KB/s shared by all downloads together, applied immediately to running downloads. YouTube downloads get the same limit through yt-dlp when they start.
+- **Sort downloads into folders by type** (Settings, off by default): downloads go into a `Video`, `Music`, `Images`, `Documents`, `Programs` or `Archives` subfolder of the download folder according to their file type; other files stay in the download folder. Downloads for which you pick a folder yourself are not sorted. The list has a matching **type filter** next to the search box (it works whether or not sorting is on).
+- **Shut down the PC when downloads finish** (button above the list, and in the notification area menu). When every download has finished, a 60-second countdown with a Cancel button appears, then Windows shuts down the way it does from the Start menu (programs with unsaved work can still stop it). Adding or resuming a download during the countdown postpones it.
+
+### Changed
+- The database schema is now version 3 (one new column). Upgrading from 1.0–1.2 is automatic and keeps your history; older versions can still open the database.
+- The status bar shows the speed limit and whether sorting by type is on.
+
+### Tests
+- Full results, including two bugs found and fixed before release, are in [docs/test-report-1.3.0.md](docs/test-report-1.3.0.md).
+- 17 new engine and unit tests (speed limit pacing, shared limit, yt-dlp limit, change link with resume, restart and expired links, categories at add time and at server naming, pause/resume/restart inside a category folder, shutdown-when-done state machine, settings validation, schema 3 upgrade). The end-to-end UI test now also covers the speed limit, sorting and the type filter, changing an expired link, the shutdown countdown and its cancellation, closing to the notification area and restoring from it, starting hidden, and (on packaged builds) the Windows startup entry.
+
 ## [1.2.0] - 2026-10-22
 
 ### Added
@@ -43,6 +62,7 @@ All notable changes to Haul Download Manager are listed here. Versions follow [S
 
 First release: HTTP/HTTPS downloads with a queue, pause and resume (validated byte ranges), automatic retries, crash recovery, persistent history and settings (SQLite), Mark of the Web on finished files, an optional Chrome/Edge extension, and a per-user Windows installer plus a portable build.
 
+[1.3.0]: https://github.com/hamza03084/haul-download-manager/releases/tag/v1.3.0
 [1.2.0]: https://github.com/hamza03084/haul-download-manager/releases/tag/v1.2.0
 [1.1.0]: #110---2026-10-22
 [1.0.0]: #100---2026-10-22

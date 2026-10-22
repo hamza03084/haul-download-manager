@@ -34,16 +34,16 @@ export class SqliteStore implements DownloadStore {
     }
     this.upsertStmt = this.db.prepare(`
       INSERT INTO downloads (id, kind, url, final_url, file_name, directory, file_name_settled, state, total_bytes,
-        downloaded_bytes, resumable, etag, last_modified, error, notice, created_at, updated_at, completed_at, media)
+        downloaded_bytes, resumable, etag, last_modified, error, notice, created_at, updated_at, completed_at, media, auto_category)
       VALUES (:id, :kind, :url, :finalUrl, :fileName, :directory, :fileNameSettled, :state, :totalBytes,
-        :downloadedBytes, :resumable, :etag, :lastModified, :error, :notice, :createdAt, :updatedAt, :completedAt, :media)
+        :downloadedBytes, :resumable, :etag, :lastModified, :error, :notice, :createdAt, :updatedAt, :completedAt, :media, :autoCategory)
       ON CONFLICT(id) DO UPDATE SET
         kind = excluded.kind, url = excluded.url, final_url = excluded.final_url, file_name = excluded.file_name,
         directory = excluded.directory, file_name_settled = excluded.file_name_settled, state = excluded.state,
         total_bytes = excluded.total_bytes, downloaded_bytes = excluded.downloaded_bytes,
         resumable = excluded.resumable, etag = excluded.etag, last_modified = excluded.last_modified,
         error = excluded.error, notice = excluded.notice, updated_at = excluded.updated_at,
-        completed_at = excluded.completed_at, media = excluded.media`);
+        completed_at = excluded.completed_at, media = excluded.media, auto_category = excluded.auto_category`);
   }
 
   /**
@@ -66,6 +66,8 @@ export class SqliteStore implements DownloadStore {
     };
     step(1, V1_SCHEMA);
     step(2, `ALTER TABLE downloads ADD COLUMN kind TEXT NOT NULL DEFAULT 'http'; ALTER TABLE downloads ADD COLUMN media TEXT`);
+    // 1.3: downloads still waiting to be sorted into a category subfolder once their name is known.
+    step(3, `ALTER TABLE downloads ADD COLUMN auto_category INTEGER NOT NULL DEFAULT 0`);
   }
 
   loadAll(): DownloadRecord[] {
@@ -95,6 +97,7 @@ export class SqliteStore implements DownloadStore {
       updatedAt: r.updatedAt,
       completedAt: r.completedAt,
       media: r.media ? JSON.stringify(r.media) : null,
+      autoCategory: r.autoCategory ? 1 : 0,
     });
   }
 
@@ -234,5 +237,6 @@ function rowToRecord(row: Record<string, unknown>): DownloadRecord {
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
     completedAt: num(row.completed_at),
+    autoCategory: Number(row.auto_category ?? 0) === 1,
   };
 }

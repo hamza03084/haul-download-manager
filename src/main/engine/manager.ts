@@ -9,7 +9,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { IncomingMessage } from 'node:http';
 import { createInterface } from 'node:readline';
 import type { AddDownloadRequest, DownloadRecord, DownloadState, DownloadView, MediaInfo, MediaSpec, MediaToolsStatus, Settings } from '../../shared/types';
-import { MAX_CONCURRENT_LIMIT } from '../../shared/types';
+import { MAX_CONCURRENT_LIMIT, MAX_SPEED_LIMIT, SETTINGS_DEFAULTS } from '../../shared/types';
+import { categoryOf } from '../../shared/categories';
 import {
   MEDIA_PARTS_SUFFIX,
   MediaError,
@@ -52,6 +53,7 @@ import {
 } from './filename';
 import { fileSize, fileSizeSync, freeSpace, removeIfExists, renameWithRetry, samePath } from './fsutil';
 import { SpeedMeter } from './speed';
+import { RateLimiter } from './throttle';
 import type { DownloadStore } from './store';
 import { ValidationError, isMediaPage, redactText, redactUrl, validateDownloadUrl } from './urls';
 
@@ -147,6 +149,8 @@ export class DownloadManager extends EventEmitter {
   private readonly userAgent?: string;
   private readonly mediaCommand: string[] | null;
   private readonly installer: ToolInstaller | null;
+  /** One limiter for every transfer, so the speed limit in Settings is the total. */
+  private readonly limiter = new RateLimiter();
 
   constructor(opts: ManagerOptions) {
     super();
@@ -164,6 +168,7 @@ export class DownloadManager extends EventEmitter {
     this.getFreeSpace = opts.getFreeSpace ?? freeSpace;
     this.onFileFinalized = opts.onFileFinalized;
     this.settings = normalizeSettings({ ...opts.defaultSettings, ...this.store.loadSettings() }, opts.defaultSettings);
+    this.limiter.setRate(this.settings.speedLimit);
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -271,6 +276,8 @@ export class DownloadManager extends EventEmitter {
     const autoTurnedOn = next.autoMediaTools && !this.settings.autoMediaTools;
     this.settings = next;
     this.store.saveSettings(next);
+    // Takes effect at once for running transfers (yt-dlp downloads pick it up when they next start).
+    this.limiter.setRate(next.speedLimit);
     this.schedule();
     if (autoTurnedOn) void this.prepareMediaTools();
     return this.getSettings();
@@ -390,6 +397,12 @@ export class DownloadManager extends EventEmitter {
     return r ? this.view(r) : null;
   }
 
+  /** True when nothing is downloading or waiting to download (used by "shut down when done"). */
+  isIdle(): boolean {
+    for (const r of this.records.values()) if (r.state === 'queued' || r.state === 'downloading') return false;
+    return true;
+  }
+
   /** Full path of a completed download's file. */
   completedFilePath(id: string): string | null {
     const r = this.records.get(id);
@@ -436,20 +449,27 @@ export class DownloadManager extends EventEmitter {
       // Downloading the page itself would only save its HTML.
       throw new ValidationError('This is a YouTube page, not a file. Paste it in the add bar and choose a quality.');
     }
-    const directory = typeof req.directory === 'string' && req.directory.trim() ? req.directory.trim() : this.settings.downloadDirectory;
+    let directory = typeof req.directory === 'string' && req.directory.trim() ? req.directory.trim() : this.settings.downloadDirectory;
     if (!path.isAbsolute(directory)) throw new ValidationError('Choose a full folder path for the download (for example C:\\Users\\You\\Downloads).');
+    // Categories apply to the default folder only: a folder picked for this download is used as is.
+    let autoCategory = this.settings.categoriesEnabled && samePath(directory, this.settings.downloadDirectory);
     const id = randomUUID();
     let fileName: string;
     let settled = false;
     if (media) {
       const chosen = typeof req.fileName === 'string' && req.fileName.trim() ? req.fileName.trim() : media.title;
       const stem = sanitizeFileName(chosen, 'video').replace(/\.(mp4|m4a|mp3|mkv|webm|mov)$/i, '');
-      fileName = uniqueFileName(directory, stem + mediaExtension(media), (p) => this.isPathTaken(p, id));
+      const name = stem + mediaExtension(media);
+      if (autoCategory) ({ directory, autoCategory } = this.sortedDirectory(directory, name));
+      fileName = uniqueFileName(directory, name, (p) => this.isPathTaken(p, id));
       settled = true;
     } else if (typeof req.fileName === 'string' && req.fileName.trim()) {
-      fileName = uniqueFileName(directory, sanitizeFileName(req.fileName.trim()), (p) => this.isPathTaken(p, id));
+      const name = sanitizeFileName(req.fileName.trim());
+      if (autoCategory) ({ directory, autoCategory } = this.sortedDirectory(directory, name));
+      fileName = uniqueFileName(directory, name, (p) => this.isPathTaken(p, id));
       settled = true;
     } else {
+      // The real name comes from the server; the category subfolder is chosen then (see attempt()).
       fileName = sanitizeFileName(fileNameFromUrl(url.href) ?? '', 'download');
     }
     const now = Date.now();
@@ -475,6 +495,7 @@ export class DownloadManager extends EventEmitter {
       updatedAt: now,
       completedAt: null,
       media,
+      autoCategory,
     };
     this.records.set(id, rec);
     this.store.upsert(rec);
@@ -482,6 +503,44 @@ export class DownloadManager extends EventEmitter {
     this.emitChange(rec);
     this.schedule();
     return this.view(rec);
+  }
+
+  /** The category subfolder for `fileName` under `directory`, or `directory` itself for files of no category. */
+  private sortedDirectory(directory: string, fileName: string): { directory: string; autoCategory: false } {
+    const category = categoryOf(fileName);
+    return { directory: category ? path.join(directory, category.folder) : directory, autoCategory: false };
+  }
+
+  /**
+   * Gives a paused, failed or cancelled download a new link, for example a fresh copy of a link that
+   * expired, and starts it. Data already downloaded is kept: the usual resume checks (same size and
+   * version) decide whether it can be continued, otherwise the download restarts from the beginning.
+   */
+  changeUrl(id: string, input: unknown): DownloadView {
+    const r = this.require(id);
+    const url = validateDownloadUrl(input);
+    if (r.kind === 'media') throw new ValidationError('The link of a YouTube download cannot be changed. Remove it and add the new link.');
+    if (isMediaPage(url)) throw new ValidationError('This is a YouTube page, not a file. Paste it in the add bar and choose a quality.');
+    if (r.state !== 'paused' && r.state !== 'failed' && r.state !== 'cancelled') {
+      throw new ValidationError('Pause the download before changing its link.');
+    }
+    const patch: Partial<DownloadRecord> = {
+      url: url.href,
+      finalUrl: null,
+      state: 'queued',
+      error: null,
+      completedAt: null,
+      notice: r.downloadedBytes > 0 ? 'Link changed. The data downloaded so far is kept if the new link serves the same file.' : 'Link changed.',
+    };
+    if (r.state === 'cancelled' && r.fileNameSettled) {
+      // Like retry(): the name was released on cancel, so claim it again.
+      patch.fileName = uniqueFileName(r.directory, r.fileName, (p) => this.isPathTaken(p, id));
+      patch.downloadedBytes = 0;
+    }
+    this.log.info(`link changed ${id} -> ${redactUrl(url)}`);
+    const next = this.patch(id, patch);
+    this.schedule();
+    return this.view(next);
   }
 
   async pause(id: string): Promise<void> {
@@ -752,7 +811,7 @@ export class DownloadManager extends EventEmitter {
 
     const ext = path.extname(rec.fileName);
     const stem = rec.fileName.slice(0, rec.fileName.length - ext.length);
-    const args = buildDownloadArgs(spec, { url: rec.url, home: rec.directory, temp: parts, stem, tools });
+    const args = buildDownloadArgs(spec, { url: rec.url, home: rec.directory, temp: parts, stem, tools, rateLimit: this.settings.speedLimit });
     this.log.info(`yt-dlp ${task.id} ${redactUrl(rec.url)} ${spec.label}`);
 
     // Progress across streams: a video download is a video stream, then a sound stream, then a merge.
@@ -961,7 +1020,21 @@ export class DownloadManager extends EventEmitter {
         const suggested =
           parseContentDisposition(header(res, 'content-disposition')) ?? fileNameFromUrl(finalUrl) ?? fileNameFromUrl(rec.url) ?? '';
         const base = withExtensionForMime(sanitizeFileName(suggested, 'download'), header(res, 'content-type'));
-        patch.fileName = uniqueFileName(rec.directory, base, (p) => this.isPathTaken(p, task.id));
+        let directory = rec.directory;
+        if (rec.autoCategory) {
+          ({ directory } = this.sortedDirectory(rec.directory, base));
+          patch.autoCategory = false;
+          if (!samePath(directory, rec.directory)) {
+            try {
+              await fsp.mkdir(directory, { recursive: true });
+              patch.directory = directory;
+            } catch (e) {
+              destroy();
+              throw new RequestError(`Cannot create the folder "${directory}" (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}).`);
+            }
+          }
+        }
+        patch.fileName = uniqueFileName(directory, base, (p) => this.isPathTaken(p, task.id));
         patch.fileNameSettled = true;
       }
       rec = this.patch(task.id, patch);
@@ -989,15 +1062,22 @@ export class DownloadManager extends EventEmitter {
     const ws = fs.createWriteStream(partPath, { flags: append ? 'a' : 'w', flush: true });
     task.ws = ws;
     task.wsBase = task.bytes;
+    const limiter = this.limiter;
     const counter = new Transform({
       transform: (chunk: Buffer, _enc, cb) => {
-        task.bytes += chunk.length;
-        task.meter.sample(task.bytes);
-        if (expectedTotal !== null && task.bytes > expectedTotal) {
-          cb(new RequestError('The server sent more data than it announced; the download was stopped to avoid a corrupt file.'));
-          return;
-        }
-        cb(null, chunk);
+        // The speed limit: waiting here stops reading from the socket, so the server slows down too.
+        limiter.take(chunk.length, signal).then(
+          () => {
+            task.bytes += chunk.length;
+            task.meter.sample(task.bytes);
+            if (expectedTotal !== null && task.bytes > expectedTotal) {
+              cb(new RequestError('The server sent more data than it announced; the download was stopped to avoid a corrupt file.'));
+              return;
+            }
+            cb(null, chunk);
+          },
+          (err: Error) => cb(err),
+        );
       },
     });
 
@@ -1206,19 +1286,30 @@ function normalizeSettings(s: Partial<Settings>, defaults: Settings): Settings {
   try {
     return validateSettings(s);
   } catch {
+    const bool = (v: unknown, d: boolean) => (typeof v === 'boolean' ? v : d);
     return {
       downloadDirectory:
         typeof s.downloadDirectory === 'string' && path.isAbsolute(s.downloadDirectory) ? s.downloadDirectory : defaults.downloadDirectory,
       maxConcurrent: Number.isInteger(s.maxConcurrent) ? Math.min(Math.max(1, s.maxConcurrent!), MAX_CONCURRENT_LIMIT) : defaults.maxConcurrent,
-      resumeOnStartup: typeof s.resumeOnStartup === 'boolean' ? s.resumeOnStartup : defaults.resumeOnStartup,
+      resumeOnStartup: bool(s.resumeOnStartup, defaults.resumeOnStartup),
       ytDlpPath: typeof s.ytDlpPath === 'string' && (s.ytDlpPath === '' || path.isAbsolute(s.ytDlpPath)) ? s.ytDlpPath : '',
-      autoMediaTools: typeof s.autoMediaTools === 'boolean' ? s.autoMediaTools : defaults.autoMediaTools,
+      autoMediaTools: bool(s.autoMediaTools, defaults.autoMediaTools),
+      speedLimit: Number.isInteger(s.speedLimit) && s.speedLimit! >= 0 ? Math.min(s.speedLimit!, MAX_SPEED_LIMIT) : defaults.speedLimit,
+      categoriesEnabled: bool(s.categoriesEnabled, defaults.categoriesEnabled),
+      startWithWindows: bool(s.startWithWindows, defaults.startWithWindows),
+      closeToTray: bool(s.closeToTray, defaults.closeToTray),
     };
   }
 }
 
 export function validateSettings(input: unknown): Settings {
   const s = (input ?? {}) as Record<string, unknown>;
+  // Settings saved by an older Haul lack the values added since: those keep their defaults.
+  const optionalBool = (v: unknown, name: string, fallback: boolean): boolean => {
+    if (v === undefined || v === null) return fallback;
+    if (typeof v !== 'boolean') throw new ValidationError(`Invalid "${name}" value.`);
+    return v;
+  };
   if (typeof s.downloadDirectory !== 'string' || !s.downloadDirectory.trim() || !path.isAbsolute(s.downloadDirectory.trim())) {
     throw new ValidationError('Choose a full path for the default download folder.');
   }
@@ -1232,15 +1323,20 @@ export function validateSettings(input: unknown): Settings {
   if (typeof yt !== 'string' || yt.length > 1024 || (yt.trim() !== '' && !path.isAbsolute(yt.trim()))) {
     throw new ValidationError('Choose the full path of yt-dlp.exe, or leave it empty to find it automatically.');
   }
-  // Settings saved before Haul 1.2 have no such value: getting the tools automatically is the default.
-  const auto = s.autoMediaTools === undefined || s.autoMediaTools === null ? true : s.autoMediaTools;
-  if (typeof auto !== 'boolean') throw new ValidationError('Invalid "get the tools automatically" value.');
+  const limit = s.speedLimit === undefined || s.speedLimit === null ? 0 : Number(s.speedLimit);
+  if (!Number.isInteger(limit) || limit < 0 || limit > MAX_SPEED_LIMIT) {
+    throw new ValidationError('The speed limit must be a whole number of KB/s (0 or empty for no limit).');
+  }
   return {
     downloadDirectory: path.resolve(s.downloadDirectory.trim()),
     maxConcurrent: max,
     resumeOnStartup: s.resumeOnStartup,
     ytDlpPath: yt.trim() ? path.resolve(yt.trim()) : '',
-    autoMediaTools: auto,
+    autoMediaTools: optionalBool(s.autoMediaTools, 'get the tools automatically', SETTINGS_DEFAULTS.autoMediaTools),
+    speedLimit: limit,
+    categoriesEnabled: optionalBool(s.categoriesEnabled, 'categories', SETTINGS_DEFAULTS.categoriesEnabled),
+    startWithWindows: optionalBool(s.startWithWindows, 'start with Windows', SETTINGS_DEFAULTS.startWithWindows),
+    closeToTray: optionalBool(s.closeToTray, 'keep running in the background', SETTINGS_DEFAULTS.closeToTray),
   };
 }
 

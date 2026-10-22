@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactElement } from 'react';
-import type { DownloadState, DownloadView, Settings } from '../shared/types';
-import { formatSpeed } from '../shared/format';
+import type { DownloadState, DownloadView, PowerState, Settings } from '../shared/types';
+import { CATEGORIES, categoryOf } from '../shared/categories';
+import { formatBytes, formatSpeed } from '../shared/format';
 import { api } from './api';
 import { AddBar, type AddBarHandle } from './components/AddBar';
 import { DownloadCard, type CardAction } from './components/DownloadCard';
-import { RemoveDialog, SettingsPanel } from './components/Panels';
-import { BrandMark, IconBroom, IconGear, IconPause, IconPlay } from './components/Icons';
+import { ChangeLinkDialog, RemoveDialog, SettingsPanel, ShutdownDialog } from './components/Panels';
+import { BrandMark, IconBroom, IconGear, IconPause, IconPlay, IconPower } from './components/Icons';
 
 type Filter = 'all' | DownloadState;
 const FILTERS: { key: Filter; label: string }[] = [
@@ -53,6 +54,9 @@ export function App() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [removing, setRemoving] = useState<DownloadView | null>(null);
+  const [changingLink, setChangingLink] = useState<DownloadView | null>(null);
+  const [category, setCategory] = useState('all');
+  const [power, setPower] = useState<PowerState>({ armed: false, shutdownAt: null, unavailable: true });
   const [toasts, setToasts] = useState<Toast[]>([]);
   const addBar = useRef<AddBarHandle>(null);
 
@@ -68,10 +72,12 @@ export function App() {
       setLoaded(true);
     });
     void api.getSettings().then(setSettings);
+    void api.getPower().then(setPower);
     const offs = [
       api.onDownloadChanged((item) => dispatch({ type: 'upsert', item })),
       api.onDownloadRemoved((id) => dispatch({ type: 'remove', id })),
       api.onAddRequest((url) => addBar.current?.prefill(url, true)),
+      api.onPowerChanged(setPower),
     ];
     void api.takePendingAddRequests().then((urls) => {
       if (urls.length) addBar.current?.prefill(urls[urls.length - 1], true);
@@ -104,8 +110,16 @@ export function App() {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return all.filter((d) => (filter === 'all' || d.state === filter) && (!q || d.fileName.toLowerCase().includes(q) || d.url.toLowerCase().includes(q)));
-  }, [all, filter, query]);
+    const inCategory = (d: DownloadView) => {
+      if (category === 'all') return true;
+      const c = categoryOf(d.fileName);
+      return category === 'other' ? c === null : c?.key === category;
+    };
+    return all.filter(
+      (d) =>
+        (filter === 'all' || d.state === filter) && inCategory(d) && (!q || d.fileName.toLowerCase().includes(q) || d.url.toLowerCase().includes(q)),
+    );
+  }, [all, filter, category, query]);
 
   const run = useCallback(
     async (p: Promise<{ ok: boolean; error?: string }>) => {
@@ -131,12 +145,23 @@ export function App() {
           return void run(api.openFile(d.id));
         case 'folder':
           return void run(api.showInFolder(d.id));
+        case 'changeLink':
+          return setChangingLink(d);
         case 'remove':
           return setRemoving(d);
       }
     },
     [run],
   );
+
+  const toggleShutdown = useCallback(async () => {
+    const res = await api.setShutdownWhenDone(!power.armed);
+    if (!res.ok) notify(res.error, 'error');
+    else {
+      setPower(res.value);
+      notify(res.value.armed ? 'Haul will shut down the PC once every download has finished (with a 60-second warning).' : 'Shutdown when done turned off.');
+    }
+  }, [power.armed, notify]);
 
   const toggle = useCallback((id: string) => setExpanded((e) => (e === id ? null : id)), []);
 
@@ -188,6 +213,15 @@ export function App() {
           ))}
         </div>
         <div className="filters-right">
+          <select className="category-select" value={category} onChange={(e) => setCategory(e.target.value)} aria-label="Filter by type">
+            <option value="all">All types</option>
+            {CATEGORIES.map((c) => (
+              <option key={c.key} value={c.key}>
+                {c.folder}
+              </option>
+            ))}
+            <option value="other">Other</option>
+          </select>
           <input className="search" type="search" placeholder="Search name or link" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search downloads" />
           <button className="btn btn-ghost sm" onClick={() => run(api.resumeAll())} disabled={counts.paused === 0} title="Resume all paused">
             <IconPlay width={15} height={15} /> Resume all
@@ -203,6 +237,16 @@ export function App() {
           >
             <IconBroom width={15} height={15} /> Clear finished
           </button>
+          {!power.unavailable && (
+            <button
+              className={`btn btn-ghost sm ${power.armed ? 'is-on' : ''}`}
+              onClick={() => void toggleShutdown()}
+              aria-pressed={power.armed}
+              title={power.armed ? 'The PC will shut down when every download has finished. Click to turn this off.' : 'Shut down the PC when every download has finished'}
+            >
+              <IconPower width={15} height={15} /> {power.armed ? 'Shutting down when done' : 'Shut down when done'}
+            </button>
+          )}
         </div>
       </nav>
 
@@ -225,11 +269,36 @@ export function App() {
           ⤓ {settings?.downloadDirectory ?? '…'}
         </span>
         <span>
-          {settings ? `${settings.maxConcurrent} at a time` : ''} · {all.length} in history
+          {settings ? `${settings.maxConcurrent} at a time` : ''}
+          {settings && settings.speedLimit > 0 ? ` · limit ${formatBytes(settings.speedLimit)}/s` : ''}
+          {settings?.categoriesEnabled ? ' · sorted by type' : ''} · {all.length} in history
         </span>
       </footer>
 
       {showSettings && settings && <SettingsPanel initial={settings} onClose={() => setShowSettings(false)} onSaved={setSettings} />}
+      {changingLink && (
+        <ChangeLinkDialog
+          d={changingLink}
+          onClose={() => setChangingLink(null)}
+          onChanged={(msg) => {
+            setChangingLink(null);
+            notify(msg);
+          }}
+        />
+      )}
+      {power.shutdownAt !== null && (
+        <ShutdownDialog
+          power={power}
+          onCancel={() => {
+            void api.setShutdownWhenDone(false).then((res) => {
+              if (res.ok) {
+                setPower(res.value);
+                notify('Shutdown cancelled.');
+              }
+            });
+          }}
+        />
+      )}
       {removing && (
         <RemoveDialog
           d={removing}

@@ -127,6 +127,9 @@ describe('reading what yt-dlp reports', () => {
     assert.equal(audio[audio.indexOf('-f') + 1], '140/ba');
     assert.equal(audio[audio.indexOf('--audio-format') + 1], 'mp3');
     assert.ok(audio.includes('-x'));
+    assert.ok(!args.includes('--limit-rate'), 'no limit by default');
+    const limited = buildDownloadArgs(spec, { url: VIDEO, home: 'C:\\dl', temp: 'C:\\t', stem: 's', tools, rateLimit: 512_000 });
+    assert.equal(limited[limited.indexOf('--limit-rate') + 1], '512000', 'the speed limit is passed to yt-dlp in bytes per second');
   });
 
   test('a quality choice from the UI cannot smuggle options onto the command line', () => {
@@ -205,8 +208,10 @@ describe('database upgrade', () => {
     assert.equal(rows.length, 2);
     assert.deepEqual(rows.find((r) => r.id === 'new-1')!.media, media);
     again.close();
+    assert.equal(rows.find((r) => r.id === 'old-1')!.autoCategory, false, '1.3 column defaults for old rows');
     const check = new DatabaseSync(file);
-    assert.equal((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2);
+    assert.equal((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3);
+    assert.ok((check.prepare('PRAGMA table_info(downloads)').all() as { name: string }[]).some((c) => c.name === 'auto_category'));
     check.close();
   });
 });
@@ -355,7 +360,7 @@ describe('video downloads through yt-dlp (fake yt-dlp)', () => {
     const store = new SqliteStore(dbFile);
     store.upsert({
       id: 'crashed-media', kind: 'media', media: validateMediaRequest(mediaRequest({ title: 'Orphan' })), url: orphanUrl, finalUrl: null,
-      fileName: 'Orphan.mp4', directory: dir, fileNameSettled: true, state: 'downloading', totalBytes: 800_000, downloadedBytes: 50_000,
+      fileName: 'Orphan.mp4', directory: dir, fileNameSettled: true, state: 'downloading', totalBytes: 800_000, downloadedBytes: 50_000, autoCategory: false,
       resumable: true, etag: null, lastModified: null, error: null, notice: null, createdAt: now, updatedAt: now, completedAt: null,
     });
     store.close();

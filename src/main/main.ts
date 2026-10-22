@@ -1,16 +1,21 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray, type IpcMainInvokeEvent } from 'electron';
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as tls from 'node:tls';
-import type { ActionResult, AddDownloadRequest, DownloadView, ToolInstallStatus } from '../shared/types';
+import { SETTINGS_DEFAULTS, type ActionResult, type AddDownloadRequest, type DownloadView, type Settings, type ToolInstallStatus } from '../shared/types';
+import { formatSpeed } from '../shared/format';
 import { DownloadManager, type Logger } from './engine/manager';
 import { openStore, type SqliteStore } from './engine/store';
 import { ToolInstaller } from './engine/tools';
 import { PROTOCOL_SCHEME, ValidationError, extractProtocolUrls, redactText, redactUrl, validateDownloadUrl } from './engine/urls';
 import { createFileLogger } from './logger';
+import { ShutdownWhenDone } from './power';
 import { markFromInternet } from './zone';
 
 const PROTOCOL = PROTOCOL_SCHEME;
+/** Passed by the "start with Windows" entry: start in the notification area without a window. */
+const HIDDEN_FLAG = '--hidden';
 
 // Optional override, used by automated tests and for running from a USB stick.
 // Everything else lives in the per-user %APPDATA%\Haul Download Manager folder.
@@ -24,18 +29,20 @@ if (!app.requestSingleInstanceLock()) {
 
 let mainWindow: BrowserWindow | null = null;
 let manager: DownloadManager | null = null;
+let tray: Tray | null = null;
+let power: ShutdownWhenDone | null = null;
 const pendingAddUrls: string[] = [];
 let rendererReady = false;
+let quitting = false;
+let startHidden = process.argv.includes(HIDDEN_FLAG);
+let explainedTray = false;
 let log: Logger = { info() {}, warn() {}, error() {} };
 
 async function bootstrap(): Promise<void> {
   registerProtocolClient();
   app.on('second-instance', (_e, argv) => {
     for (const url of extractProtocolUrls(argv)) deliverAddRequest(url);
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    showWindow();
   });
   for (const url of extractProtocolUrls(process.argv)) pendingAddUrls.push(url);
 
@@ -44,7 +51,7 @@ async function bootstrap(): Promise<void> {
 
   const userData = app.getPath('userData');
   log = createFileLogger(path.join(userData, 'logs'));
-  log.info(`starting ${app.getName()} ${app.getVersion()} (electron ${process.versions.electron})`);
+  log.info(`starting ${app.getName()} ${app.getVersion()} (electron ${process.versions.electron})${startHidden ? ' hidden' : ''}`);
   useWindowsCertificates();
 
   let store: SqliteStore;
@@ -71,45 +78,73 @@ async function bootstrap(): Promise<void> {
   manager = new DownloadManager({
     store,
     logger: log,
-    defaultSettings: { downloadDirectory: defaultDir, maxConcurrent: 3, resumeOnStartup: true, ytDlpPath: '', autoMediaTools: true },
+    defaultSettings: { ...SETTINGS_DEFAULTS, downloadDirectory: defaultDir },
     onFileFinalized: (file, rec) => markFromInternet(file, rec.url, log),
     userAgent: userAgent(),
     mediaCommand: testMediaCommand(),
     toolInstaller: installer,
   });
   manager.init();
-  wireIpc(manager);
+  const m = manager;
+  applyLoginItem(m.getSettings());
+
+  power = new ShutdownWhenDone({
+    countdownMs: Number(process.env.HAUL_SHUTDOWN_COUNTDOWN_MS) || 60_000,
+    execute: shutdownWindows,
+    unavailable: process.platform !== 'win32',
+  });
+  power.on('changed', (s) => {
+    mainWindow?.webContents.send('power:changed', s);
+    if (s.shutdownAt !== null) showWindow(); // the countdown must be visible so it can be cancelled
+    updateTray();
+  });
+  power.on('error', (msg: string) => {
+    log.error(`shutdown when done: ${msg}`);
+    const notice = { type: 'error' as const, title: 'Haul Download Manager', message: 'Windows could not be shut down.', detail: msg };
+    void (mainWindow ? dialog.showMessageBox(mainWindow, notice) : dialog.showMessageBox(notice));
+  });
+
+  wireIpc(m);
   installer?.on('status', (s: ToolInstallStatus) => mainWindow?.webContents.send('media:toolsProgress', s));
 
   let lastTaskbarUpdate = 0;
-  manager.on('changed', (v: DownloadView) => {
+  // Listeners use `m`, never the module variable: they still fire while the manager shuts down.
+  m.on('changed', (v: DownloadView) => {
     mainWindow?.webContents.send('downloads:changed', v);
     const now = Date.now();
     if (now - lastTaskbarUpdate > 500 || v.state !== 'downloading') {
       lastTaskbarUpdate = now;
       updateTaskbarProgress();
+      updateTray();
     }
+    if (!quitting) power?.queueChanged(m.isIdle());
   });
-  manager.on('removed', (id: string) => mainWindow?.webContents.send('downloads:removed', id));
+  m.on('removed', (id: string) => {
+    mainWindow?.webContents.send('downloads:removed', id);
+    if (!quitting) power?.queueChanged(m.isIdle());
+    updateTray();
+  });
 
-  let quitting = false;
+  let shutdownStarted = false;
   app.on('before-quit', (e) => {
-    if (quitting || !manager) return;
-    e.preventDefault();
     quitting = true;
-    manager
-      .shutdown()
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    e.preventDefault();
+    power?.dispose();
+    m.shutdown()
       .catch((err) => log.error(`shutdown error: ${err}`))
       .finally(() => app.quit());
   });
   app.on('window-all-closed', () => app.quit());
 
+  createTray();
   createWindow();
   // Get the YouTube tools in the background once the window is up, so the first YouTube link is quick.
   // Checking again every few hours keeps yt-dlp current when Haul stays open for days (the installer
   // itself looks for a newer release at most once a day).
-  setTimeout(() => void manager?.prepareMediaTools(), 3_000).unref();
-  setInterval(() => void manager?.prepareMediaTools(), 4 * 60 * 60 * 1000).unref();
+  setTimeout(() => void m.prepareMediaTools(), 3_000).unref();
+  setInterval(() => void m.prepareMediaTools(), 4 * 60 * 60 * 1000).unref();
   if (quarantined) {
     const notice = {
       type: 'warning' as const,
@@ -166,8 +201,9 @@ function userAgent(): string {
   return `HaulDownloadManager/${app.getVersion()} (Windows${/^https:\/\/\S+$/.test(homepage) ? `; +${homepage}` : ''})`;
 }
 
+const iconPath = path.join(__dirname, '..', '..', '..', 'build', 'icon.png');
+
 function createWindow(): void {
-  const iconPath = path.join(__dirname, '..', '..', '..', 'build', 'icon.png');
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
@@ -191,7 +227,29 @@ function createWindow(): void {
   wc.on('did-finish-load', () => {
     rendererReady = true;
   });
-  mainWindow.once('ready-to-show', () => mainWindow?.show());
+  mainWindow.once('ready-to-show', () => {
+    // Started by Windows at sign-in: stay in the notification area until the user opens the window.
+    if (startHidden && tray) {
+      startHidden = false;
+      return;
+    }
+    mainWindow?.show();
+  });
+  // "Keep running in the background": closing the window only hides it; the tray menu quits.
+  mainWindow.on('close', (e) => {
+    if (quitting || !tray || !manager?.getSettings().closeToTray) return;
+    e.preventDefault();
+    mainWindow?.hide();
+    if (!explainedTray) {
+      explainedTray = true;
+      tray.displayBalloon({
+        title: 'Haul keeps running',
+        content: 'Downloads continue in the background. Open Haul from this icon, or choose Quit Haul from its menu.',
+        iconType: 'info',
+        respectQuietTime: true,
+      });
+    }
+  });
   // Windows is shutting down, restarting or signing out. 'before-quit' is not emitted in this case and
   // the process may be terminated at any moment, so flush partial files synchronously first.
   mainWindow.on('session-end', () => {
@@ -204,6 +262,130 @@ function createWindow(): void {
     rendererReady = false;
   });
   void mainWindow.loadFile(path.join(__dirname, '..', '..', 'renderer', 'index.html'));
+}
+
+/** Brings the window to the front, restoring it from the notification area or the taskbar. */
+function showWindow(): void {
+  if (!mainWindow) return;
+  startHidden = false;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// ------------------------------------------------------------------ notification area (tray)
+
+function createTray(): void {
+  try {
+    const image = trayImage();
+    if (!image) {
+      log.warn('tray icon image not found; notification area icon disabled');
+      return;
+    }
+    tray = new Tray(image);
+    tray.on('click', showWindow);
+    tray.on('double-click', showWindow);
+    updateTray();
+    // For the end-to-end test, which cannot click the real notification area.
+    (globalThis as { __haulTray?: Tray }).__haulTray = tray;
+  } catch (e) {
+    log.warn(`could not create the tray icon: ${(e as Error).message}`);
+    tray = null;
+  }
+}
+
+/** The app icon at the sizes Windows uses in the notification area (16 px, 32 px at 200 %). */
+function trayImage(): Electron.NativeImage | null {
+  let source: Electron.NativeImage;
+  try {
+    source = nativeImage.createFromBuffer(fs.readFileSync(iconPath));
+  } catch {
+    return null;
+  }
+  if (source.isEmpty()) return null;
+  const image = nativeImage.createEmpty();
+  image.addRepresentation({ scaleFactor: 1, buffer: source.resize({ width: 16, height: 16 }).toPNG() });
+  image.addRepresentation({ scaleFactor: 2, buffer: source.resize({ width: 32, height: 32 }).toPNG() });
+  return image;
+}
+
+function updateTray(): void {
+  if (!tray || !manager) return;
+  const active = manager.activeViews();
+  const speed = active.reduce((s, d) => s + d.speed, 0);
+  const state = power?.state();
+  let tip = 'Haul Download Manager';
+  if (active.length) tip += `: ${active.length} downloading at ${formatSpeed(speed)}`;
+  if (state?.shutdownAt) tip += ' · shutting down the PC soon';
+  else if (state?.armed) tip += ' · will shut down the PC when done';
+  tray.setToolTip(tip.slice(0, 127));
+  const m = manager;
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: 'Open Haul', click: showWindow },
+      { type: 'separator' },
+      { label: 'Resume all', click: () => m.resumeAll() },
+      { label: 'Pause all', click: () => void m.pauseAll().catch((e) => log.warn(`pause all: ${e}`)) },
+      {
+        label: 'Shut down the PC when downloads finish',
+        type: 'checkbox',
+        checked: !!state?.armed,
+        visible: !state?.unavailable,
+        click: (item) => power?.setArmed(item.checked, m.isIdle()),
+      },
+      { type: 'separator' },
+      { label: 'Quit Haul', click: () => app.quit() },
+    ]),
+  );
+}
+
+// ------------------------------------------------------------------ start with Windows
+
+/**
+ * Registers (or removes) Haul in the current user's startup entries, with the flag that makes it
+ * start in the notification area. Per user, so no administrator rights are needed. When running
+ * from source (`electron .`) nothing is registered: that would register electron.exe.
+ */
+function applyLoginItem(settings: Settings): void {
+  if (process.platform !== 'win32') return;
+  if (process.defaultApp) {
+    if (settings.startWithWindows) log.info('start with Windows: not registered when running from source');
+    return;
+  }
+  // The portable build runs from a temporary folder; register the portable .exe itself.
+  const exe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+  try {
+    app.setLoginItemSettings({ openAtLogin: settings.startWithWindows, path: exe, args: [HIDDEN_FLAG] });
+    log.info(`start with Windows: ${settings.startWithWindows ? 'on' : 'off'} (${exe})`);
+  } catch (e) {
+    log.warn(`start with Windows could not be applied: ${(e as Error).message}`);
+  }
+}
+
+// ------------------------------------------------------------------ shut down when done
+
+/**
+ * Asks Windows to shut down. Without /f, programs with unsaved work can still stop the shutdown,
+ * as they can when you choose Shut down in the Start menu. HAUL_FAKE_SHUTDOWN=1 (tests) only logs.
+ */
+function shutdownWindows(): Promise<void> {
+  if (process.env.HAUL_FAKE_SHUTDOWN === '1') {
+    log.info('shutdown when done: downloads finished; Windows would be shut down now (HAUL_FAKE_SHUTDOWN is set)');
+    return Promise.resolve();
+  }
+  const exe = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'shutdown.exe');
+  log.info('shutdown when done: downloads finished; shutting down Windows');
+  return new Promise((resolve, reject) => {
+    execFile(exe, ['/s', '/t', '0'], { windowsHide: true }, (err, _stdout, stderr) => {
+      if (err) {
+        reject(new Error(String(stderr || '').trim() || err.message));
+        return;
+      }
+      // Windows is ending the session: close cleanly now rather than being terminated mid-write.
+      setTimeout(() => app.quit(), 500).unref();
+      resolve();
+    });
+  });
 }
 
 function updateTaskbarProgress(): void {
@@ -244,6 +426,7 @@ function wireIpc(m: DownloadManager): void {
   handle('downloads:resume', (id) => m.resume(parseId(id)));
   handle('downloads:retry', (id) => m.retry(parseId(id)));
   handle('downloads:cancel', (id) => m.cancel(parseId(id)));
+  handle('downloads:changeUrl', (id, url) => m.changeUrl(parseId(id), url));
   handle('downloads:remove', (id, deleteFile) => m.remove(parseId(id), deleteFile === true));
   handle('downloads:pauseAll', () => m.pauseAll());
   handle('downloads:resumeAll', () => m.resumeAll());
@@ -268,7 +451,19 @@ function wireIpc(m: DownloadManager): void {
     if (err) throw new ValidationError(err);
   });
   ipcMain.handle('settings:get', () => m.getSettings());
-  handle('settings:save', (s) => m.updateSettings(s));
+  handle('settings:save', (s) => {
+    const saved = m.updateSettings(s);
+    applyLoginItem(saved);
+    updateTray();
+    return saved;
+  });
+
+  ipcMain.handle('power:get', () => power?.state() ?? { armed: false, shutdownAt: null, unavailable: true });
+  handle('power:setShutdownWhenDone', (armed) => {
+    if (typeof armed !== 'boolean') throw new ValidationError('Invalid value.');
+    if (!power) throw new ValidationError('Not available.');
+    return power.setArmed(armed, m.isIdle());
+  });
 
   // Video pages: one quality lookup at a time; a new one (or closing the picker) cancels the previous.
   let probe: AbortController | null = null;

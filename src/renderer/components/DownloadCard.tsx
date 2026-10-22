@@ -1,9 +1,9 @@
 import { memo, type ReactElement } from 'react';
 import type { DownloadView } from '../../shared/types';
 import { formatBytes, formatDuration, formatSpeed } from '../../shared/format';
-import { IconFolder, IconOpen, IconPause, IconPlay, IconRetry, IconStop, IconTrash } from './Icons';
+import { IconFolder, IconLink, IconOpen, IconPause, IconPlay, IconRetry, IconStop, IconTrash } from './Icons';
 
-export type CardAction = 'pause' | 'resume' | 'retry' | 'cancel' | 'remove' | 'open' | 'folder';
+export type CardAction = 'pause' | 'resume' | 'retry' | 'cancel' | 'remove' | 'open' | 'folder' | 'changeLink';
 
 interface Props {
   d: DownloadView;
@@ -202,6 +202,8 @@ function actionsFor(d: DownloadView, on: Props['onAction']) {
   if (d.state === 'failed' || d.state === 'cancelled') out.push(main('retry', 'Retry', 'Retry', <IconRetry width={15} height={15} />, 'is-primary'));
   if (d.state === 'completed' && d.fileExists) out.push(main('open', 'Open file', 'Open', <IconOpen width={15} height={15} />, 'is-primary'));
   out.push(b('folder', 'Show in folder', <IconFolder />));
+  // For links that expired while the download was stopped: continue from a fresh link.
+  if (d.kind === 'http' && (d.state === 'paused' || d.state === 'failed' || d.state === 'cancelled')) out.push(b('changeLink', 'Change link', <IconLink />));
   if (d.state === 'downloading' || d.state === 'queued' || d.state === 'paused') out.push(b('cancel', 'Cancel download', <IconStop />, 'is-danger'));
   out.push(b('remove', 'Remove from list', <IconTrash />, 'is-danger'));
   return out;

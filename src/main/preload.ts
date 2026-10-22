@@ -1,6 +1,6 @@
 // Sandboxed preload: may only require 'electron'. Keep imports from local files type-only.
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
-import type { DownloadView, HaulApi, ToolInstallStatus } from '../shared/types';
+import type { DownloadView, HaulApi, PowerState, ToolInstallStatus } from '../shared/types';
 
 function subscribe<T>(channel: string, cb: (value: T) => void): () => void {
   const listener = (_e: IpcRendererEvent, value: T) => cb(value);
@@ -15,6 +15,7 @@ const api: HaulApi = {
   resume: (id) => ipcRenderer.invoke('downloads:resume', id),
   retry: (id) => ipcRenderer.invoke('downloads:retry', id),
   cancel: (id) => ipcRenderer.invoke('downloads:cancel', id),
+  changeUrl: (id, url) => ipcRenderer.invoke('downloads:changeUrl', id, url),
   remove: (id, deleteFile) => ipcRenderer.invoke('downloads:remove', id, deleteFile),
   pauseAll: () => ipcRenderer.invoke('downloads:pauseAll'),
   resumeAll: () => ipcRenderer.invoke('downloads:resumeAll'),
@@ -30,6 +31,9 @@ const api: HaulApi = {
   getMediaTools: () => ipcRenderer.invoke('media:tools'),
   updateMediaTools: () => ipcRenderer.invoke('media:updateTools'),
   onMediaToolsProgress: (cb) => subscribe<ToolInstallStatus>('media:toolsProgress', cb),
+  getPower: () => ipcRenderer.invoke('power:get'),
+  setShutdownWhenDone: (armed) => ipcRenderer.invoke('power:setShutdownWhenDone', armed),
+  onPowerChanged: (cb) => subscribe<PowerState>('power:changed', cb),
   readClipboardUrl: () => ipcRenderer.invoke('clipboard:readUrl'),
   takePendingAddRequests: () => ipcRenderer.invoke('app:takePendingAddRequests'),
   getVersion: () => ipcRenderer.invoke('app:version'),

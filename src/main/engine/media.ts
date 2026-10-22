@@ -248,7 +248,7 @@ export function mediaExtension(spec: Pick<MediaSpec, 'mode' | 'audioFormat'>): s
 
 export function buildDownloadArgs(
   spec: MediaSpec,
-  o: { url: string; home: string; temp: string; stem: string; tools: MediaTools },
+  o: { url: string; home: string; temp: string; stem: string; tools: MediaTools; rateLimit?: number },
 ): string[] {
   const args = [
     '--ignore-config',
@@ -276,6 +276,8 @@ export function buildDownloadArgs(
   ];
   if (o.tools.ffmpeg) args.push('--ffmpeg-location', o.tools.ffmpeg);
   if (o.tools.jsRuntime) args.push('--js-runtimes', o.tools.jsRuntime);
+  // yt-dlp's own limiter, in bytes per second. It applies to this yt-dlp process only.
+  if (o.rateLimit && o.rateLimit > 0) args.push('--limit-rate', String(Math.floor(o.rateLimit)));
   const h = spec.height ?? 1080;
   const alt = (...xs: (string | null | undefined | false)[]) => xs.filter(Boolean).join('/');
   if (spec.mode === 'video') {

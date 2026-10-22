@@ -83,6 +83,18 @@ export const IconBroom = (p: P) => (
     <path d="M15 3l-4.5 9M7 13h8l1.5 8h-11z" />
   </svg>
 );
+export const IconLink = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.5 1.5" />
+    <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.5-1.5" />
+  </svg>
+);
+export const IconPower = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M12 3v9" />
+    <path d="M7 6.3a8 8 0 1 0 10 0" />
+  </svg>
+);
 export const IconCopy = (p: P) => (
   <svg {...base(p)}>
     <rect x="8" y="8" width="12" height="12" rx="2" />

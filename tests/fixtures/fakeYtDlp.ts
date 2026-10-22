@@ -58,7 +58,9 @@ async function main(): Promise<number> {
   const audioFormat = audioMode ? value('--audio-format') : null;
   const vsize = Number(q.get('vsize') ?? 600_000);
   const asize = Number(q.get('asize') ?? 200_000);
-  const delay = Number(q.get('delay') ?? 0);
+  // Like yt-dlp's --limit-rate (bytes per second): pace each 32 KiB chunk accordingly.
+  const limitRate = args.includes('--limit-rate') ? Number(value('--limit-rate')) : 0;
+  const delay = Number(q.get('delay') ?? 0) || (limitRate > 0 ? Math.round((32 * 1024 * 1000) / limitRate) : 0);
   const failAt = q.get('failat') ? Number(q.get('failat')) : null;
   const temp = paths.temp ?? paths.home;
   fs.mkdirSync(temp, { recursive: true });

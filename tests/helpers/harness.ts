@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DownloadManager, type ManagerOptions } from '../../src/main/engine/manager';
 import { SqliteStore } from '../../src/main/engine/store';
-import type { DownloadView } from '../../src/shared/types';
+import { SETTINGS_DEFAULTS, type DownloadView } from '../../src/shared/types';
 
 const created: string[] = [];
 // Test folders are removed when the test process ends, so repeated runs do not fill up %TEMP%.
@@ -29,7 +29,7 @@ export function createHarness(opts: Partial<ManagerOptions> & { dir?: string; db
   const dbFile = opts.dbFile ?? path.join(dir, '.state', 'test.db');
   const manager = new DownloadManager({
     store: new SqliteStore(dbFile),
-    defaultSettings: { downloadDirectory: dir, maxConcurrent: opts.maxConcurrent ?? 3, resumeOnStartup: true, ytDlpPath: '', autoMediaTools: true },
+    defaultSettings: { ...SETTINGS_DEFAULTS, downloadDirectory: dir, maxConcurrent: opts.maxConcurrent ?? 3 },
     timeoutMs: 5_000,
     retryDelaysMs: [50, 100, 150],
     progressIntervalMs: 50,

@@ -53,6 +53,7 @@ describe('crash and power-loss durability', () => {
       createdAt: now,
       updatedAt: now,
       completedAt: null,
+      autoCategory: false,
     };
     const store = new SqliteStore(dbFile);
     store.upsert(rec);
@@ -223,7 +224,7 @@ describe('things users do to files and data', () => {
       s.upsert({
         id: `id-${i}`, kind: 'http', media: null, url: `https://example.com/${i}.bin`, finalUrl: null, fileName: `${i}.bin`, directory: dir,
         fileNameSettled: true, state: 'completed', totalBytes: 1, downloadedBytes: 1, resumable: true, etag: null,
-        lastModified: null, error: null, notice: 'x'.repeat(200), createdAt: now, updatedAt: now, completedAt: now,
+        lastModified: null, error: null, notice: 'x'.repeat(200), createdAt: now, updatedAt: now, completedAt: now, autoCategory: false,
       });
     }
     s.close();
