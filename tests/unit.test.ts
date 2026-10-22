@@ -125,6 +125,7 @@ test('validateSettings enforces limits', () => {
     categoriesEnabled: false,
     startWithWindows: false,
     closeToTray: false,
+    connections: 4,
   });
   const base = { downloadDirectory: dir, maxConcurrent: 1, resumeOnStartup: true };
   assert.equal(validateSettings({ ...base, speedLimit: 512_000 }).speedLimit, 512_000);

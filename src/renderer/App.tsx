@@ -147,6 +147,8 @@ export function App() {
           return void run(api.showInFolder(d.id));
         case 'changeLink':
           return setChangingLink(d);
+        case 'tryVideo':
+          return addBar.current?.pickVideo(d.url);
         case 'remove':
           return setRemoving(d);
       }
@@ -271,6 +273,7 @@ export function App() {
         <span>
           {settings ? `${settings.maxConcurrent} at a time` : ''}
           {settings && settings.speedLimit > 0 ? ` · limit ${formatBytes(settings.speedLimit)}/s` : ''}
+          {settings && settings.connections > 1 ? ` · ${settings.connections} connections` : ''}
           {settings?.categoriesEnabled ? ' · sorted by type' : ''} · {all.length} in history
         </span>
       </footer>

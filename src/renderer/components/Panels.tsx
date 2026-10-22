@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   MAX_CONCURRENT_LIMIT,
+  MAX_CONNECTIONS,
   MAX_SPEED_LIMIT,
   type DownloadView,
   type MediaToolsStatus,
@@ -45,6 +46,7 @@ export function SettingsPanel({ initial, onClose, onSaved }: { initial: Settings
   const [categories, setCategories] = useState(initial.categoriesEnabled);
   const [startWithWindows, setStartWithWindows] = useState(initial.startWithWindows);
   const [closeToTray, setCloseToTray] = useState(initial.closeToTray);
+  const [connections, setConnections] = useState(initial.connections);
   const [tools, setTools] = useState<MediaToolsStatus | null>(null);
   const [install, setInstall] = useState<ToolInstallStatus | null>(null);
   const [toolsError, setToolsError] = useState<string | null>(null);
@@ -105,6 +107,7 @@ export function SettingsPanel({ initial, onClose, onSaved }: { initial: Settings
       categoriesEnabled: categories,
       startWithWindows,
       closeToTray,
+      connections,
     });
     setSaving(false);
     if (!res.ok) {
@@ -165,6 +168,38 @@ export function SettingsPanel({ initial, onClose, onSaved }: { initial: Settings
             </div>
           </section>
           <section className="setting">
+            <h3>Connections per download</h3>
+            <p>
+              Big files are fetched in parts, each over its own connection, which is faster on servers that limit the speed of each
+              connection. It does not help when your own line is the bottleneck, and a few servers allow only one connection (Haul then uses
+              fewer by itself). 1 turns it off.
+            </p>
+            <div className="stepper" role="group" aria-label="Connections per download">
+              <button className="btn btn-ghost" onClick={() => setConnections((c) => Math.max(1, c - 1))} aria-label="Fewer connections" disabled={connections <= 1}>
+                −
+              </button>
+              <output className="mono stepper-value" aria-live="polite">
+                {connections}
+              </output>
+              <button
+                className="btn btn-ghost"
+                onClick={() => setConnections((c) => Math.min(MAX_CONNECTIONS, c + 1))}
+                aria-label="More connections"
+                disabled={connections >= MAX_CONNECTIONS}
+              >
+                +
+              </button>
+              <input
+                type="range"
+                min={1}
+                max={MAX_CONNECTIONS}
+                value={connections}
+                onChange={(e) => setConnections(Number(e.target.value))}
+                aria-label="Connections per download slider"
+              />
+            </div>
+          </section>
+          <section className="setting">
             <h3>Speed limit</h3>
             <p>The total for all downloads together. Useful to keep the connection usable for everything else.</p>
             <label className="check">
@@ -183,7 +218,7 @@ export function SettingsPanel({ initial, onClose, onSaved }: { initial: Settings
               />
               <span className="unit">KB/s</span>
             </div>
-            <p className="hint">YouTube downloads apply a new limit when they next start.</p>
+            <p className="hint">Video downloads through yt-dlp apply a new limit when they next start.</p>
           </section>
           <section className="setting">
             <label className="check big">
@@ -221,11 +256,12 @@ export function SettingsPanel({ initial, onClose, onSaved }: { initial: Settings
             </label>
           </section>
           <section className="setting">
-            <h3>YouTube downloads</h3>
+            <h3>Video sites (YouTube, Vimeo, …)</h3>
             <p>
-              Uses the free tools yt-dlp, FFmpeg and Deno (a 150 MB download, 300 MB on disk). Haul can download them from their
-              official GitHub pages, check them against their published checksums and keep yt-dlp up to date. Only save videos you
-              have the right to keep.
+              Video pages are downloaded with the free tools yt-dlp, FFmpeg and Deno (a 150 MB download, 300 MB on disk). Haul can
+              download them from their official GitHub pages, check them against their published checksums and keep yt-dlp up to date.
+              yt-dlp knows over a thousand sites; services with copy protection (Netflix, Spotify…) are refused. Only save videos you have
+              the right to keep.
             </p>
             <label className="check">
               <input type="checkbox" checked={autoTools} onChange={(e) => setAutoTools(e.target.checked)} />

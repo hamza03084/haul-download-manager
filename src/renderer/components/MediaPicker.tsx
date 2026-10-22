@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AudioFormat, MediaInfo, MediaMode, MediaQuality, ToolInstallStatus } from '../../shared/types';
+import { mediaSiteOfUrl, type AudioFormat, type MediaInfo, type MediaMode, type MediaQuality, type ToolInstallStatus } from '../../shared/types';
 import { formatBytes, formatDuration } from '../../shared/format';
 import { api } from '../api';
 import { IconClose, IconFolder } from './Icons';
@@ -15,7 +15,7 @@ interface Props {
 
 const MODES: { key: MediaMode; label: string; hint: string }[] = [
   { key: 'video', label: 'Video + sound', hint: 'One MP4 file, ready to play' },
-  { key: 'video-only', label: 'Video only', hint: 'No sound track' },
+  { key: 'video-only', label: 'Video only', hint: 'No sound track (where the site offers the picture separately)' },
   { key: 'audio', label: 'Audio only', hint: 'Music or speech only' },
 ];
 
@@ -40,7 +40,7 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
   const [install, setInstall] = useState<ToolInstallStatus | null>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
 
-  // The first YouTube link may have to wait while Haul downloads yt-dlp, FFmpeg and Deno.
+  // The first video link may have to wait while Haul downloads yt-dlp, FFmpeg and Deno.
   useEffect(() => api.onMediaToolsProgress(setInstall), []);
 
   useEffect(() => {
@@ -73,14 +73,18 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
     return () => window.removeEventListener('keydown', h);
   }, [onClose]);
 
-  const quality = info?.qualities.find((q) => q.height === height) ?? null;
+  // "Video only" needs a stream without sound, which not every site offers at every size.
+  const listed = (info?.qualities ?? []).filter((q) => mode !== 'video-only' || q.videoOnlyFormatId);
+  const quality = listed.find((q) => q.height === height) ?? listed[0] ?? null;
+  const videoOnlyPossible = !!info?.qualities.some((q) => q.videoOnlyFormatId);
   const mp3Bytes = info?.durationSeconds ? Math.round((info.durationSeconds * MP3_KBPS * 1000) / 8) : null;
+  const site = info?.site ?? mediaSiteOfUrl(url) ?? 'Video page';
 
   const sizeFor = (q: MediaQuality | null, m: MediaMode): number | null => {
     if (!info) return null;
-    if (m === 'audio') return audioFormat === 'mp3' ? mp3Bytes : info.audioBytes;
+    if (m === 'audio') return audioFormat === 'mp3' ? mp3Bytes : info.audioBytes ?? (info.qualities[0]?.hasAudio ? info.qualities[0].videoBytes : null);
     if (!q?.videoBytes) return null;
-    return m === 'video' ? q.videoBytes + (info.audioBytes ?? 0) : q.videoBytes;
+    return m === 'video' && !q.hasAudio ? q.videoBytes + (info.audioBytes ?? 0) : q.videoBytes;
   };
   const total = sizeFor(quality, mode);
   const label = useMemo(() => {
@@ -91,8 +95,8 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
 
   // Missing tools, or Haul could not get them (network, checksum, full disk…): Settings can help.
   const toolsMissing =
-    !!error && (install?.state === 'failed' || (/not found|could not be started/i.test(error) && /yt-dlp|FFmpeg/.test(error)) || /tools YouTube needs|Could not download (yt-dlp|FFmpeg|Deno)/.test(error));
-  // Audio without a listed stream still works: yt-dlp falls back to the best audio it finds.
+    !!error && (install?.state === 'failed' || (/not found|could not be started/i.test(error) && /yt-dlp|FFmpeg/.test(error)) || /tools video downloads need|Could not download (yt-dlp|FFmpeg|Deno)/.test(error));
+  // Audio without a listed stream still works: yt-dlp takes the sound out of the best video it finds.
   const canAdd = !!info && !adding && (mode === 'audio' || !!quality);
 
   const add = async () => {
@@ -108,13 +112,14 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
         audioFormat: mode === 'audio' ? audioFormat : null,
         thumbnail: thumbnail && info.hasThumbnail,
         subtitles: subtitles || null,
-        videoFormatId: mode === 'audio' ? null : quality!.formatId,
-        audioFormatId: mode === 'video-only' ? null : info.audioFormatId,
+        videoFormatId: mode === 'audio' ? null : mode === 'video-only' ? quality!.videoOnlyFormatId : quality!.formatId,
+        // A stream that has its sound built in needs no separate audio stream.
+        audioFormatId: mode === 'video-only' || (mode === 'video' && quality!.hasAudio) ? null : info.audioFormatId,
         videoId: info.videoId,
         title: info.title,
         label,
         estimateVideo: mode === 'audio' ? null : quality?.videoBytes ?? null,
-        estimateAudio: mode === 'video-only' ? null : mode === 'audio' && audioFormat === 'mp3' ? mp3Bytes : info.audioBytes,
+        estimateAudio: mode === 'video-only' || (mode === 'video' && quality?.hasAudio) ? null : mode === 'audio' && audioFormat === 'mp3' ? mp3Bytes : info.audioBytes,
       },
     });
     setAdding(false);
@@ -129,7 +134,7 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
     <div className="overlay overlay-modal" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal picker" role="dialog" aria-modal="true" aria-labelledby="picker-title">
         <header className="picker-head">
-          <span className="picker-kicker mono">YouTube</span>
+          <span className="picker-kicker mono">{site}</span>
           <button className="icon-btn" onClick={onClose} aria-label="Close">
             <IconClose />
           </button>
@@ -141,7 +146,7 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
             <div>
               {install?.state === 'installing' ? (
                 <>
-                  <h2 id="picker-title">Getting the YouTube tools ready…</h2>
+                  <h2 id="picker-title">Getting the video tools ready…</h2>
                   <p>
                     First time only: Haul is downloading {install.tool ?? 'the tools'} from its official GitHub page
                     {install.received > 0 && (
@@ -158,7 +163,7 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
                 <>
                   <h2 id="picker-title">Finding available qualities…</h2>
                   <p>
-                    yt-dlp is asking YouTube which video and audio versions exist. This usually takes 5–20 seconds.
+                    yt-dlp is asking {site} which video and audio versions exist. This usually takes 5–20 seconds.
                     <span className="mono picker-elapsed"> {elapsed} s</span>
                   </p>
                 </>
@@ -169,7 +174,7 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
 
         {error && (
           <div className="picker-error">
-            <h2 id="picker-title">{toolsMissing ? 'The YouTube tools are not ready' : 'Could not use this video'}</h2>
+            <h2 id="picker-title">{toolsMissing ? 'The video tools are not ready' : 'Could not use this video'}</h2>
             <p className="form-error" role="alert">
               {error}
             </p>
@@ -203,7 +208,7 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
                   aria-selected={mode === m.key}
                   className={`chip ${mode === m.key ? 'is-on' : ''}`}
                   onClick={() => setMode(m.key)}
-                  disabled={m.key !== 'audio' && info.qualities.length === 0}
+                  disabled={(m.key !== 'audio' && info.qualities.length === 0) || (m.key === 'video-only' && !videoOnlyPossible)}
                   title={m.hint}
                 >
                   {m.label}
@@ -213,11 +218,11 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
 
             {mode !== 'audio' ? (
               <div className="picker-list" role="radiogroup" aria-label="Quality">
-                {info.qualities.map((q) => (
+                {listed.map((q) => (
                   <label key={q.height} className={`picker-row ${height === q.height ? 'is-on' : ''}`}>
                     <input type="radio" name="quality" checked={height === q.height} onChange={() => setHeight(q.height)} />
                     <span className="picker-q">{q.label}</span>
-                    <span className="picker-codec mono">{q.codec}</span>
+                    <span className="picker-codec mono">{q.codec}{q.hasAudio && mode === 'video' ? ' + sound' : ''}</span>
                     <span className="picker-size mono">{sizeFor(q, mode) ? `≈ ${formatBytes(sizeFor(q, mode))}` : 'size unknown'}</span>
                   </label>
                 ))}
@@ -272,7 +277,7 @@ export function MediaPicker({ url, directory, startPaused, onClose, onAdded, onO
             </p>
             <p className="picker-legal">
               Only save videos you have the right to keep, such as your own uploads or videos with a free licence. Downloads use the free
-              tool yt-dlp; YouTube's terms otherwise allow offline viewing only in its own app.
+              tool yt-dlp; most sites' terms otherwise allow offline viewing only in their own apps.
             </p>
 
             <div className="modal-actions">

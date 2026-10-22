@@ -244,7 +244,7 @@ describe('the download manager and automatic tools', () => {
     });
     const f = await waitFor(h.manager, d.id, isState('failed'));
     assert.match(f.error ?? '', /Could not download yt-dlp: the server answered HTTP 503/);
-    assert.ok(h.events.some((e) => e.id === d.id && /Getting the YouTube tools ready/.test(e.phase ?? '')), 'the card says what it is waiting for');
+    assert.ok(h.events.some((e) => e.id === d.id && /Getting the video tools ready/.test(e.phase ?? '')), 'the card says what it is waiting for');
     assert.equal(server.requestsFor('/yt-dlp/sums').length, 3, 'tried three times');
     await assert.rejects(h.manager.probeMedia(VIDEO, new AbortController().signal), /HTTP 503/);
     const status = await h.manager.mediaToolsStatus();

@@ -1,9 +1,9 @@
 import { memo, type ReactElement } from 'react';
 import type { DownloadView } from '../../shared/types';
 import { formatBytes, formatDuration, formatSpeed } from '../../shared/format';
-import { IconFolder, IconLink, IconOpen, IconPause, IconPlay, IconRetry, IconStop, IconTrash } from './Icons';
+import { IconFolder, IconLink, IconOpen, IconPause, IconPlay, IconRetry, IconStop, IconTrash, IconVideo } from './Icons';
 
-export type CardAction = 'pause' | 'resume' | 'retry' | 'cancel' | 'remove' | 'open' | 'folder' | 'changeLink';
+export type CardAction = 'pause' | 'resume' | 'retry' | 'cancel' | 'remove' | 'open' | 'folder' | 'changeLink' | 'tryVideo';
 
 interface Props {
   d: DownloadView;
@@ -98,6 +98,24 @@ export const DownloadCard = memo(function DownloadCard({ d, expanded, onToggle, 
               </dd>
             </div>
           )}
+          {d.kind === 'http' && (d.segments || d.connections > 0) && (
+            <div>
+              <dt>Connections</dt>
+              <dd>
+                {d.state === 'downloading'
+                  ? `${d.connections} open now`
+                  : d.segments
+                    ? `Downloaded in ${d.segments.length} part${d.segments.length === 1 ? '' : 's'}`
+                    : ''}
+              </dd>
+            </div>
+          )}
+          {d.referrer && (
+            <div>
+              <dt>From page</dt>
+              <dd className="mono selectable">{d.referrer}</dd>
+            </div>
+          )}
           {d.finalUrl && d.finalUrl !== d.url && (
             <div>
               <dt>Redirected to</dt>
@@ -118,7 +136,7 @@ export const DownloadCard = memo(function DownloadCard({ d, expanded, onToggle, 
               {d.totalBytes === null
                 ? 'Unknown until the server reports it'
                 : d.kind === 'media' && d.state !== 'completed'
-                  ? `about ${formatBytes(d.totalBytes)} (estimated by YouTube)`
+                  ? `about ${formatBytes(d.totalBytes)} (estimated by the site)`
                   : `${formatBytes(d.totalBytes)} (${d.totalBytes.toLocaleString()} bytes)`}
             </dd>
           </div>
@@ -148,6 +166,7 @@ function metaLine(d: DownloadView): string {
     case 'downloading': {
       const parts = [of, formatSpeed(d.speed)];
       if (d.etaSeconds !== null) parts.push(`${formatDuration(d.etaSeconds)} left`);
+      if (d.connections > 1) parts.push(`${d.connections} connections`);
       // Media downloads say which stage they are in; while joining or converting no bytes move.
       if (d.phase && !d.phase.startsWith('Downloading')) return `${d.phase}  ·  ${of}`;
       if (d.phase) parts.unshift(d.phase);
@@ -204,6 +223,8 @@ function actionsFor(d: DownloadView, on: Props['onAction']) {
   out.push(b('folder', 'Show in folder', <IconFolder />));
   // For links that expired while the download was stopped: continue from a fresh link.
   if (d.kind === 'http' && (d.state === 'paused' || d.state === 'failed' || d.state === 'cancelled')) out.push(b('changeLink', 'Change link', <IconLink />));
+  // A link that turned out to be a web page may be a video page yt-dlp knows.
+  if (d.kind === 'http' && d.state === 'completed' && /web page/.test(d.notice ?? '')) out.push(main('tryVideo', 'Try as video page', 'Try as video', <IconVideo width={15} height={15} />));
   if (d.state === 'downloading' || d.state === 'queued' || d.state === 'paused') out.push(b('cancel', 'Cancel download', <IconStop />, 'is-danger'));
   out.push(b('remove', 'Remove from list', <IconTrash />, 'is-danger'));
   return out;

@@ -53,7 +53,7 @@ describe('crash and power-loss durability', () => {
       createdAt: now,
       updatedAt: now,
       completedAt: null,
-      autoCategory: false,
+      autoCategory: false, segments: null, referrer: null,
     };
     const store = new SqliteStore(dbFile);
     store.upsert(rec);
@@ -80,6 +80,7 @@ describe('crash and power-loss durability', () => {
     for (;;) {
       const stored = peek.loadAll().find((r) => r.id === d.id)!;
       if (stored.state === 'completed') break;
+      if (stored.state === 'failed' || stored.state === 'cancelled') throw new Error(`download ended ${stored.state}: ${stored.error}`);
       if (stored.state === 'downloading' && stored.downloadedBytes > 0) {
         checkpoints++;
         const onDisk = fs.statSync(path.join(h.dir, 'steady.bin.haulpart')).size;
@@ -224,7 +225,7 @@ describe('things users do to files and data', () => {
       s.upsert({
         id: `id-${i}`, kind: 'http', media: null, url: `https://example.com/${i}.bin`, finalUrl: null, fileName: `${i}.bin`, directory: dir,
         fileNameSettled: true, state: 'completed', totalBytes: 1, downloadedBytes: 1, resumable: true, etag: null,
-        lastModified: null, error: null, notice: 'x'.repeat(200), createdAt: now, updatedAt: now, completedAt: now, autoCategory: false,
+        lastModified: null, error: null, notice: 'x'.repeat(200), createdAt: now, updatedAt: now, completedAt: now, autoCategory: false, segments: null, referrer: null,
       });
     }
     s.close();
@@ -259,7 +260,7 @@ const chaosSeeds = Array.from({ length: Number(process.env.HAUL_CHAOS_SEEDS) || 
 
 describe('impatient user (randomised actions)', () => {
   for (const seed of chaosSeeds) {
-    test(`random pause/resume/cancel/retry/remove/duplicate storm keeps every file correct (seed ${seed})`, async () => {
+    test(`random pause/resume/cancel/retry/remove/duplicate storm keeps every file correct (seed ${seed}, ${seed % 2 === 0 ? `${2 + (seed % 3)} connections` : '1 connection'})`, async () => {
       const rnd = mulberry32(seed);
       const pick = <T>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)];
       const bodies = new Map<string, Buffer>();
@@ -278,7 +279,9 @@ describe('impatient user (randomised actions)', () => {
           dropAfter: i === 0 ? 150_000 : null, // one server drops the first connection
         });
       }
-      const h = createHarness({ maxConcurrent: 3, maxAutoRetries: 3 });
+      // Every other seed downloads in parts (2-4 connections) with small parts, so splitting happens on these files.
+      const connections = seed % 2 === 0 ? 2 + (seed % 3) : 1;
+      const h = createHarness({ maxConcurrent: 3, maxAutoRetries: 3, connections, minSegmentBytes: 64 * 1024 });
       const ids: string[] = [];
       const unexpected: string[] = [];
       const act = async (name: string, fn: () => unknown) => {

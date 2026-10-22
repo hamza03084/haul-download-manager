@@ -1,6 +1,6 @@
 # Haul Download Manager
 
-A free, open-source download manager for Windows. Paste a link, and Haul downloads it with live progress, pause and resume (where the server allows it), a download queue, and a history that survives restarts. Paste a YouTube link and you can choose the quality (up to 4K), or audio only (Haul gets the [tools this needs](#youtube-downloads) by itself).
+A free, open-source download manager for Windows. Paste a link, and Haul downloads it with several connections at once, live progress, pause and resume (where the server allows it), a download queue, and a history that survives restarts. Its browser extension takes over downloads from Chrome and Edge. Paste a YouTube, Vimeo, TikTok or other video page link and you can choose the quality (up to 4K), or audio only (Haul gets the [tools this needs](#video-sites-youtube-vimeo-and-more) by itself).
 
 ![Haul in light mode, downloading a YouTube video at 720p](docs/screenshot-light.png)
 
@@ -16,6 +16,8 @@ Haul is an independent project. It is not affiliated with, and contains no code 
 
 ## Features
 
+- **Several connections per file.** Big files are fetched in up to 16 parts at once (4 by default), which is much faster on servers that limit the speed of each connection. Each part is checkpointed on its own, so pause, resume and crash recovery work per part. Servers that refuse extra connections get fewer; servers that cannot serve parts get one.
+- **Takes over browser downloads.** With the Chrome/Edge extension, a download started in the browser is paused at once and handed to Haul, with the page it came from. Right-click → **Download with Haul** still works for any link.
 - **Pause and resume.** Haul only continues a download when the server confirms it is sending the rest of the same file (byte ranges plus ETag/Last-Modified checks). Otherwise it starts over and tells you why. Each download shows **Resumable** or **No resume** up front.
 - **Survives crashes, power cuts and Windows shutdowns.** Partial data is flushed to disk every 2 seconds, and the next time you open Haul it continues from the last safe point instead of starting over.
 - **A download queue.** Choose 1–10 downloads at a time; the rest wait their turn. **Resume all**, **Pause all**, filters by status, and search by name or link.
@@ -25,12 +27,11 @@ Haul is an independent project. It is not affiliated with, and contains no code 
 - **Sort by type.** Optionally saves downloads into Video, Music, Images, Documents, Programs or Archives subfolders, and a type filter in the list either way.
 - **Notification area icon, start with Windows, keep running in the background.** Haul can start hidden when you sign in, so downloads interrupted by a restart continue by themselves, and can keep downloading after you close its window. Both are off by default.
 - **Shut down the PC when downloads finish**, with a 60-second countdown you can cancel.
-- **YouTube quality picker.** Video with sound at every resolution up to 4K/60 fps, video only, or audio only (M4A original quality or MP3), plus the thumbnail and subtitles if you want them.
-- **No setup for YouTube.** Haul downloads yt-dlp, FFmpeg and Deno from their official GitHub releases, checks every file against its published SHA-256 checksum, and keeps yt-dlp up to date once a day.
+- **Video sites: quality picker.** YouTube, Vimeo, Dailymotion, Twitch, TikTok, X, Facebook, Instagram, Reddit, SoundCloud and the other sites yt-dlp knows. Video with sound at every size the site offers (up to 4K/60 fps), video only, or audio only (M4A or MP3), plus the thumbnail and subtitles if you want them. Any other page can be tried as a video page with one click.
+- **No setup for video sites.** Haul downloads yt-dlp, FFmpeg and Deno from their official GitHub releases, checks every file against its published SHA-256 checksum, and keeps yt-dlp up to date once a day.
 - **Warns about web pages.** If a link returns a login page or an expired-link page instead of the file, the download says so instead of looking finished.
 - **Safe file handling.** Existing files are never overwritten, dangerous file names are cleaned, and finished files get the Windows "downloaded from the internet" mark, as with browsers.
 - **Persistent history** of every download, kept across restarts.
-- **Browser extension** for Chrome and Edge: right-click a link → **Download with Haul**.
 - **Private.** No telemetry, accounts or ads. Your history stays on your PC.
 - **Light and dark themes** that follow Windows, and progress on the taskbar icon.
 - **Installer or portable exe.** Neither needs administrator rights.
@@ -59,7 +60,8 @@ Release builds are currently **not code-signed** (signing certificates cost mone
 1. **Add a download.** Paste a link into the bar at the top and press **Haul it** (or Enter). `Ctrl+L` jumps to the bar.
    - Click the **›** arrow in the bar to pick a different folder, set a file name, or add the download paused.
    - Paste several links at once (one per line, or separated by spaces) to add them all in one go.
-   - A YouTube link opens the quality picker instead (see [YouTube downloads](#youtube-downloads)).
+   - A link to a video site (YouTube, Vimeo, TikTok…) opens the quality picker instead (see [Video sites](#video-sites-youtube-vimeo-and-more)).
+   - With the [browser extension](#browser-integration-the-extension), downloads you start in Chrome or Edge appear here by themselves.
    - If you copied a link before switching to Haul, a **Use link from clipboard** suggestion appears. Haul never adds anything from the clipboard by itself.
 2. **Watch it.** Each download shows its size, progress, speed and time remaining. Click a download to see the full link, where it is saved, and whether the server supports resuming.
 3. **Control it.** Each download has a labelled main button for what you most likely want next, plus small icon buttons:
@@ -71,19 +73,32 @@ Release builds are currently **not code-signed** (signing certificates cost mone
    | **Open** | Opens the finished file with its default program. |
    | 📁 Show in folder | Opens Explorer with the file selected. |
    | 🔗 Change link | For paused, failed and cancelled downloads: continue under a fresh link (see [Expired links](#expired-links-change-link)). |
+   | 🎬 Try as video | Shown when a link turned out to be a web page: asks yt-dlp whether that page has a video, and opens the quality picker if so. |
    | ■ Cancel | Stops the download and deletes its partial data. |
    | 🗑 Remove | Removes the entry from the list. For finished downloads you can choose whether to also delete the file. |
 
    **Resume all**, **Pause all**, **Clear finished** (removes done and cancelled entries from the list; files stay on disk) and **Shut down when done** are above the list. Use the filter chips, the type filter (Video, Music, …) and the search box to find downloads.
-4. **Settings** (gear icon): default download folder, how many downloads run at the same time (1–10), the speed limit, sorting by type, whether unfinished downloads continue automatically when Haul starts, starting with Windows, and keeping Haul running in the background when its window is closed.
+4. **Settings** (gear icon): default download folder, how many downloads run at the same time (1–10), connections per download (1–16), the speed limit, sorting by type, whether unfinished downloads continue automatically when Haul starts, starting with Windows, and keeping Haul running in the background when its window is closed.
+
+### Several connections per download
+
+By default Haul fetches every file of 2 MB or more in 4 parts at the same time, each over its own connection (**Settings → Connections per download**, 1 to 16). This helps a lot on servers that cap the speed of each connection (file hosts, mirrors, many CDNs): four parts can mean four times the speed. It does not help when your own internet line is the limit, and a few servers allow only one connection per visitor.
+
+- When a part finishes early, the biggest part still running is split so the free connection helps with it, until every part is done.
+- Each part has its own checkpoint. Pausing, closing Haul, a crash or a power cut keeps every part's progress, and each one continues from its own position. The parts are written into the single `.haulpart` file at their final places, so there is nothing to join afterwards.
+- The first request asks for the whole file as before, so servers see nothing unusual until the extra connections open. Haul checks every part's reply (byte position, total size, ETag/Last-Modified) before writing it.
+- Servers that refuse the extra connections (HTTP 429, 503 or 403 for a part while the first connection works) are given fewer; the download goes on and says so. Servers that answer a part request with the whole file get one connection, and that is remembered for the download.
+- The speed limit is the total over all connections and all downloads. Downloads started with an older version continue with one connection until paused and resumed, after which the rest is split.
+
+Files that are small, served without a known size, or compressed on the fly are downloaded with one connection as before.
 
 ### Expired links (Change link)
 
-Links copied from a website's player, a cloud drive or a "download now" button often stop working after a while (the server answers **Access denied (HTTP 403)**). If that happens while a download is paused or has failed, get a fresh link from the website, press **🔗 Change link** on the download and paste it. Haul keeps the part it already has and asks the new server for the rest. It continues only if the server confirms it is sending the same file (same size and version tags, see [How pause and resume work](#how-pause-and-resume-work)); otherwise it restarts from the beginning and says so. YouTube downloads have no Change link: remove them and add the new link.
+Links copied from a website's player, a cloud drive or a "download now" button often stop working after a while (the server answers **Access denied (HTTP 403)**). If that happens while a download is paused or has failed, get a fresh link from the website, press **🔗 Change link** on the download and paste it. Haul keeps the part it already has and asks the new server for the rest. It continues only if the server confirms it is sending the same file (same size and version tags, see [How pause and resume work](#how-pause-and-resume-work)); otherwise it restarts from the beginning and says so. Video page downloads have no Change link: remove them and add the new link.
 
 ### Speed limit
 
-**Settings → Speed limit** sets one limit in KB/s for all downloads together. It takes effect immediately, also for downloads already running. YouTube downloads get the same limit through yt-dlp, but only when they start: a limit changed while a video is downloading applies to the next video.
+**Settings → Speed limit** sets one limit in KB/s for all downloads together. It takes effect immediately, also for downloads already running. Video page downloads get the same limit through yt-dlp, but only when they start: a limit changed while a video is downloading applies to the next video.
 
 ### Sorting downloads by type
 
@@ -132,64 +147,75 @@ The download continues from where it stopped **the next time Haul runs**. It doe
 
 Before continuing, Haul always checks that the server is sending the same version of the file (size and ETag/Last-Modified). If anything changed, it starts over rather than joining two different files.
 
-### Browser integration (optional)
+### Browser integration: the extension
 
-The `browser-extension` folder contains a small extension for Chrome and Microsoft Edge that adds **Download with Haul** to the right-click menu of links. It does not take over the browser's own downloads and does not interfere with other download managers.
+The `browser-extension` folder contains an extension for Chrome and Microsoft Edge (it also loads in Chromium and Brave).
 
-1. Install and run Haul once (this registers the `haul://` link handler for your Windows account).
-2. Open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**, click **Load unpacked**, and choose the `browser-extension` folder.
-3. Right-click a link → **Download with Haul**. The browser asks whether to open Haul Download Manager. Allow it, and Haul shows the link in the add bar for you to confirm. Nothing downloads until you press **Haul it**.
+1. Install and run Haul once. This registers Haul for your Windows account as the extension's *native messaging host* (the way browser extensions talk to a program on the PC) and as the handler of `haul://` links.
+2. Open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**, click **Load unpacked**, and choose the `browser-extension` folder. The extension's icon shows whether it can reach Haul.
 
-Limitation: only the link is passed to Haul, not your browser's cookies or login session, so links that require you to be signed in to a website will fail with "Access denied". Download those in the browser.
+What it does:
 
-## YouTube downloads
+- **Takes over downloads.** When a download starts in the browser (you clicked a file, or a site started one), the extension pauses it at once, hands the link, the browser's file name and the page it came from to Haul, and removes it from the browser's list. Haul adds it immediately, like any download you add yourself, and shows a notification if its window is hidden. If Haul cannot be reached, the browser's download simply continues. Haul starts by itself when it is not running.
+- **Which downloads:** by default archives, programs, video, music, documents and images of the common types, plus any file of 20 MB or more. Click the extension's icon to change the list, the size, turn on *every* download, or turn capture off. Web pages and small images stay with the browser.
+- **Right-click → Download with Haul** on any link, image, video or audio: Haul shows the link in the add bar for you to confirm.
+- Links to video sites (YouTube, Vimeo…) are not captured as files; they open Haul's quality picker instead.
 
-Paste a YouTube link (`youtube.com/watch?v=…`, `youtu.be/…`, Shorts) and Haul opens a **quality picker**:
+The browser's cookies and login session are not passed on, so a file that needs you to be signed in to the website fails in Haul with "Access denied (HTTP 403)". Download those in the browser (turn capture off for a moment, or use a file type that is not on the list).
 
-- **Video + sound**: every resolution YouTube offers (for example 2160p60 (4K), 1440p, 1080p60, 720p60, 480p…), each with its codec and estimated size. Saved as one MP4 file.
-- **Video only**: the same resolutions without the sound track.
-- **Audio only**: M4A (original quality, no re-encoding) or MP3 (converted, plays everywhere).
+How it works: Haul writes the host, a small PowerShell script started through a `.cmd` file, plus its manifest to `%APPDATA%\Haul Download Manager\native-messaging\`, and points the browsers' per-user registry keys at the manifest (`HKCU\Software\<Google\Chrome | Microsoft\Edge | Chromium | BraveSoftware\Brave-Browser>\NativeMessagingHosts\io.github.hauldm.app`). The script reads the browser's request, checks it, and starts Haul with the matching `haul://add` link (a running Haul picks it up at once). Only Haul's own extension (a fixed extension ID) may talk to the host, and the script accepts nothing but http(s) links. The uninstaller removes the keys. Firefox uses a different mechanism and is not supported yet. On PCs where a policy forbids running PowerShell scripts, capture will not work; the right-click menu still does through the `haul://` link.
+
+## Video sites: YouTube, Vimeo and more
+
+Paste a link to a video page and Haul opens a **quality picker**. Links to these sites are recognised at once: YouTube (`youtube.com/watch?v=…`, `youtu.be/…`, Shorts), Vimeo, Dailymotion, Twitch, TikTok, X (Twitter), Facebook, Instagram, Reddit, Streamable, Bilibili, Rumble, Odysee, SoundCloud, Bandcamp, TED, VK, OK.ru and the Internet Archive. For any other page, Haul first downloads the link as a file; if that turns out to be a web page, the download says so and offers **Try as video**, which asks yt-dlp (it knows over a thousand sites) whether the page has a video.
+
+- **Video + sound**: every size the site offers (for example 2160p60 (4K), 1440p, 1080p60, 720p60, 480p…), each with its codec and estimated size. Saved as one MP4 file.
+- **Video only**: the same sizes without the sound track, on sites that serve picture and sound separately (YouTube does; most others serve one stream with the sound built in, so this choice is then unavailable).
+- **Audio only**: M4A (original quality, no re-encoding where the site has a separate sound stream) or MP3 (converted, plays everywhere).
 - Optionally the **thumbnail** (JPG) and, when the video has them, **subtitles** (SRT).
 
 ![The quality picker for a YouTube video](docs/screenshot-youtube.png)
 
-The download then appears in the list like any other: progress (it shows whether it is downloading the video, the sound, or joining them), speed, pause, resume, cancel, retry, and it continues after closing Haul or a crash. Up to 1080p, Haul picks H.264, which plays everywhere. 1440p and 4K exist only as VP9 or AV1; Windows' Media Player and VLC play those.
+The download then appears in the list like any other: progress (it shows whether it is downloading the video, the sound, or joining them), speed, pause, resume, cancel, retry, and it continues after closing Haul or a crash. Up to 1080p, Haul picks H.264, which plays everywhere. 1440p and 4K on YouTube exist only as VP9 or AV1; Windows' Media Player and VLC play those. Sites that do not say how big their video is get a single **Best available** choice.
+
+Services that protect their streams with DRM (Netflix, Disney+, Prime Video, Max, Hulu, Spotify, Peacock, Paramount+, Apple TV, Crunchyroll) are refused: getting around copy protection is not allowed.
 
 ### The tools it uses
 
-YouTube downloads use three free programs. **You do not need to install them:** a few seconds after Haul starts, it downloads them from their official GitHub release pages ([yt-dlp](https://github.com/yt-dlp/yt-dlp/releases), [FFmpeg for yt-dlp](https://github.com/yt-dlp/FFmpeg-Builds/releases), [Deno](https://github.com/denoland/deno/releases)). If you paste a YouTube link before that has finished, the quality picker waits for it. The tools are a 150 MB download and take about 300 MB on disk, in `%APPDATA%\Haul Download Manager\tools`. No administrator rights are needed, and nothing is installed system-wide.
+Video page downloads use three free programs. **You do not need to install them:** a few seconds after Haul starts, it downloads them from their official GitHub release pages ([yt-dlp](https://github.com/yt-dlp/yt-dlp/releases), [FFmpeg for yt-dlp](https://github.com/yt-dlp/FFmpeg-Builds/releases), [Deno](https://github.com/denoland/deno/releases)). If you paste a video link before that has finished, the quality picker waits for it. The tools are a 150 MB download and take about 300 MB on disk, in `%APPDATA%\Haul Download Manager\tools`. No administrator rights are needed, and nothing is installed system-wide.
 
 - Every file is checked against the SHA-256 checksum its project publishes. A file that does not match is deleted and never run.
-- yt-dlp has to keep up with YouTube's changes, so Haul checks once a day whether a newer yt-dlp has been released and replaces its copy. **Settings → YouTube downloads → Update now** checks right away.
+- yt-dlp has to keep up with YouTube's changes, so Haul checks once a day whether a newer yt-dlp has been released and replaces its copy. **Settings → Video sites → Update now** checks right away.
 - The installer does not include the tools. Haul fetches them from the projects themselves, so you always get their current official builds.
 
-If you already installed the tools yourself (for example with `winget install yt-dlp.yt-dlp`, `winget install yt-dlp.FFmpeg` and `winget install DenoLand.Deno`), Haul uses your copies and downloads nothing. To stop Haul downloading anything, turn off **Settings → YouTube downloads → Get these tools automatically**. You then need to install them yourself, or put `yt-dlp.exe`, `ffmpeg.exe` and `deno.exe` in one folder and choose that `yt-dlp.exe` in Settings.
+If you already installed the tools yourself (for example with `winget install yt-dlp.yt-dlp`, `winget install yt-dlp.FFmpeg` and `winget install DenoLand.Deno`), Haul uses your copies and downloads nothing. To stop Haul downloading anything, turn off **Settings → Video sites → Get these tools automatically**. You then need to install them yourself, or put `yt-dlp.exe`, `ffmpeg.exe` and `deno.exe` in one folder and choose that `yt-dlp.exe` in Settings.
 
 | Tool | Why |
 | --- | --- |
-| yt-dlp | Reads the YouTube page and downloads the video and sound streams. Required. |
-| FFmpeg | Joins video and sound into one MP4 (YouTube serves them separately above 360p), converts MP3 and thumbnails. Required. |
+| yt-dlp | Reads the video page and downloads the video and sound streams. Required. |
+| FFmpeg | Joins video and sound into one MP4 (YouTube serves them separately above 360p), assembles HLS/DASH streams, converts MP3 and thumbnails. Required. |
 | Deno | Lets yt-dlp solve YouTube's JavaScript checks. Without it, some or all formats may be missing. |
 
 YouTube changes often, and an old yt-dlp eventually stops working. Haul keeps its own copy up to date. If you use your own copy and videos fail with errors such as "not a bot" or "no formats", update it: `winget upgrade yt-dlp.yt-dlp` (or `yt-dlp -U` for a manually downloaded copy).
 
 ### What you may download
 
-YouTube's Terms of Service allow saving videos only through YouTube's own features (YouTube Premium offline viewing; YouTube Studio for **your own** uploads). Downloading other people's videos with third-party tools may break those terms, and can infringe copyright. **Only download videos you have the right to keep:** your own uploads, videos with a free licence (Creative Commons, such as the Blender open movies), or with the owner's permission. You are responsible for how you use this feature.
+YouTube's Terms of Service allow saving videos only through YouTube's own features (YouTube Premium offline viewing; YouTube Studio for **your own** uploads), and most other sites have similar terms. Downloading other people's videos with third-party tools may break those terms, and can infringe copyright. **Only download videos you have the right to keep:** your own uploads, videos with a free licence (Creative Commons, such as the Blender open movies), or with the owner's permission. You are responsible for how you use this feature.
 
 ### Limits
 
 - One video at a time: playlists, channels, live streams and premieres are not supported.
-- Videos that need you to be signed in (private, members-only, age-restricted) are not supported: Haul does not use your browser's cookies.
-- Other video sites are not detected. A link to a site like Vimeo or Facebook is downloaded as a plain link, and Haul then warns that it saved a web page rather than a video.
-- Size estimates come from YouTube and are usually within a few percent.
+- Videos that need you to be signed in (private, members-only, age-restricted, most of Instagram and Facebook, and at the time of writing all of Vimeo, whose web player now requires an account for yt-dlp) are not supported: Haul does not use your browser's cookies. YouTube sometimes refuses with "confirm you're not a bot" for a while; Haul shows that message, and retrying later usually works.
+- Sites not on the list above are tried only when you press **Try as video** on a download that turned out to be a web page. Whether a site works depends on yt-dlp; sites that need extra programs (RTMP) do not.
+- Size estimates come from the site and are usually within a few percent; HLS streams are estimated from their bitrate.
 - Partial video streams are stored by yt-dlp in a `<name>.mp4.haulparts` folder next to the download. They are removed when the download finishes or is cancelled. yt-dlp resumes them after a pause or crash, but does not have Haul's power-cut protection for its partial files.
 
 ## Your data and privacy
 
-- **Haul has no telemetry, analytics, accounts or ads.** It connects to the links you add and, for YouTube support, to GitHub: to download yt-dlp, FFmpeg and Deno the first time, and once a day to see whether a newer yt-dlp is out (only the checksum list is fetched unless there is one). Nothing about you or your downloads is sent. Turning off **Settings → YouTube downloads → Get these tools automatically** stops all GitHub connections. For YouTube links, yt-dlp contacts YouTube.
+- **Haul has no telemetry, analytics, accounts or ads.** It connects to the links you add and, for video sites, to GitHub: to download yt-dlp, FFmpeg and Deno the first time, and once a day to see whether a newer yt-dlp is out (only the checksum list is fetched unless there is one). Nothing about you or your downloads is sent. Turning off **Settings → Video sites → Get these tools automatically** stops all GitHub connections. For video page links, yt-dlp contacts that site. Downloads captured from the browser send the page they came from as the `Referer` header, as the browser would have.
+- **The browser extension** talks only to Haul on this PC. Haul registers itself under your user's `HKCU\Software\…\NativeMessagingHosts\io.github.hauldm.app` keys for Chrome, Edge, Chromium and Brave; uninstalling removes them.
 - Haul itself does not check for updates of Haul.
-- **Settings → Start Haul when I sign in to Windows** writes one value (`electron.app.Haul Download Manager`) under your user's `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key (the same place Task Manager's Startup apps come from). Turning the setting off, or uninstalling, removes it. Nothing else is written to the registry besides the `haul://` link handler.
+- **Settings → Start Haul when I sign in to Windows** writes one value (`electron.app.Haul Download Manager`) under your user's `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key (the same place Task Manager's Startup apps come from). Turning the setting off, or uninstalling, removes it. Nothing else is written to the registry besides the `haul://` link handler and the native messaging host keys above.
 - **Shut down when done** runs Windows' own `shutdown.exe /s /t 0` when the countdown ends, nothing else.
 - Everything is stored per Windows user, in `%APPDATA%\Haul Download Manager`:
   - `data\haul.db`: download history and settings (SQLite).
@@ -211,11 +237,11 @@ YouTube's Terms of Service allow saving videos only through YouTube's own featur
 | Haul keeps running after closing its window | **Settings → Keep running in the background when the window is closed** is on. Quit from the notification area icon's menu, or turn the setting off. |
 | "Start Haul when I sign in to Windows" has no effect | It only works for installed or portable builds, not when running from source. If you moved or renamed the portable exe after turning it on, turn it off and on again. Windows lets you disable startup apps in Task Manager → Startup apps; that overrides the setting. |
 | "Windows could not be shut down" | Windows refused the shutdown command (for example a group policy). The message shows the reason; shut down from the Start menu instead. |
-| YouTube: "Could not download yt-dlp / FFmpeg / Deno" | Haul could not reach GitHub. Check your internet connection, then open **Settings → YouTube downloads** and click **Get the tools now**. On networks that block GitHub, install the tools yourself ([The tools it uses](#the-tools-it-uses)). |
-| YouTube: "…did not match the checksum its project publishes" | The download was damaged or changed on the way, so Haul deleted it. Try again later. If it keeps happening, your network may be altering downloads. |
-| YouTube: "YouTube downloads need yt-dlp / FFmpeg, which was not found" | **Get these tools automatically** is turned off in Settings. Turn it on, or install the tools yourself ([The tools it uses](#the-tools-it-uses)) and restart Haul. |
-| YouTube: "confirm you are not a bot", "no downloadable formats" or other errors from yt-dlp | Click **Settings → YouTube downloads → Update now** (or, for your own copy, `winget upgrade yt-dlp.yt-dlp` or `yt-dlp -U`). If YouTube keeps refusing, wait a while; it limits heavy use. |
-| YouTube: "This video is private / for channel members only / age-restricted" | These need a signed-in account, which Haul does not use. |
+| Video sites: "Could not download yt-dlp / FFmpeg / Deno" | Haul could not reach GitHub. Check your internet connection, then open **Settings → Video sites** and click **Get the tools now**. On networks that block GitHub, install the tools yourself ([The tools it uses](#the-tools-it-uses)). |
+| Video sites: "…did not match the checksum its project publishes" | The download was damaged or changed on the way, so Haul deleted it. Try again later. If it keeps happening, your network may be altering downloads. |
+| Video sites: "…downloads need yt-dlp / FFmpeg, which was not found" | **Get these tools automatically** is turned off in Settings. Turn it on, or install the tools yourself ([The tools it uses](#the-tools-it-uses)) and restart Haul. |
+| Video sites: "confirm you are not a bot", "no downloadable video or audio", "found no video on this page" or other errors from yt-dlp | Click **Settings → Video sites → Update now** (or, for your own copy, `winget upgrade yt-dlp.yt-dlp` or `yt-dlp -U`). If YouTube keeps refusing, wait a while; it limits heavy use. |
+| Video sites: "This video is private / for channel members only / age-restricted / needs a signed-in account" | These need a signed-in account, which Haul does not use. |
 | A finished download says "web page instead of the expected file" or "This link leads to a web page" | The server sent a web page (often a login page, an expired link or a page that contains the file). Open the link in your browser, find the real download link (right-click the download button → **Copy link**), and add that instead. |
 | "The server is limiting requests (HTTP 429)" | The server limits how often it can be contacted. Wait a few minutes and press Retry. Some sites (for example Wikimedia Commons) rate-limit clients whose User-Agent has no contact address. Official builds include one (the project's GitHub address). |
 | "…security certificate…" errors on HTTPS links | The site's certificate is invalid or untrusted. Haul trusts the same root certificates as Windows. If browsers on the same PC open the site without warnings, please report it. |
@@ -231,12 +257,12 @@ YouTube's Terms of Service allow saving videos only through YouTube's own featur
 
 ## Known limitations
 
-- **YouTube needs extra tools** (yt-dlp, FFmpeg, Deno). Haul downloads them from GitHub by itself (150 MB), so the first YouTube link needs an internet connection that can reach GitHub. Only single public videos work. See [YouTube downloads](#youtube-downloads). Other streaming sites (Vimeo, Facebook, TikTok…) are not supported.
-- **One connection per download.** Haul does not split files into parallel segments, so it is not faster than a browser for a single file. Servers that throttle each connection will be slower than in download managers that open many connections.
+- **Video sites need extra tools** (yt-dlp, FFmpeg, Deno). Haul downloads them from GitHub by itself (150 MB), so the first video link needs an internet connection that can reach GitHub. Only single public videos work, and sites not on the built-in list need **Try as video**. See [Video sites](#video-sites-youtube-vimeo-and-more).
+- **Several connections help only on servers that limit each connection**, never beyond your own line's speed, and some servers refuse them (Haul then uses fewer). Each part needs the server to support byte ranges; HTTP/2 multiplexing is not used.
 - **No proxy support.** System/PAC proxy settings are not used yet.
-- **No login sessions or cookies.** Links that need you to be signed in to a site will fail.
-- **Change link only continues when the new server confirms the same file** (same size and ETag/Last-Modified). Some sites change these for every link, in which case the download restarts from the beginning. YouTube downloads cannot have their link changed.
-- **The speed limit reaches YouTube downloads only when they start.** A limit changed while a video is downloading applies to the next video. It is also a limit per yt-dlp process, so two videos downloading at once can together use twice the limit.
+- **No login sessions or cookies.** Links that need you to be signed in to a site will fail, also when captured from the browser. The extension supports Chrome, Edge, Chromium and Brave, not Firefox.
+- **Change link only continues when the new server confirms the same file** (same size and ETag/Last-Modified). Some sites change these for every link, in which case the download restarts from the beginning. Video page downloads cannot have their link changed.
+- **The speed limit reaches video page downloads only when they start.** A limit changed while a video is downloading applies to the next video. It is also a limit per yt-dlp process, so two videos downloading at once can together use twice the limit.
 - **Sorting by type cannot be undone automatically:** turning it off leaves earlier downloads where they are.
 - **HTTP and HTTPS only.** No FTP, BitTorrent/magnet links, or video stream (HLS/DASH) capture.
 - **Resuming needs server support** (byte ranges plus a known file size). Otherwise downloads restart from the beginning, with a note saying so.
@@ -283,13 +309,13 @@ If `npm start` reports that Electron failed to install, run `node node_modules/e
 ### Project layout
 
 ```
-src/main/engine/   Download engine: HTTP, resume validation, queue, SQLite store, yt-dlp integration (no Electron imports)
-src/main/          Electron main process, preload bridge, logging, Mark of the Web
+src/main/engine/   Download engine: HTTP, parts over several connections, resume validation, queue, SQLite store, yt-dlp integration (no Electron imports)
+src/main/          Electron main process, preload bridge, native messaging host, logging, Mark of the Web
 src/renderer/      React user interface
 src/shared/        Types and formatting shared by both sides
 tests/             Unit, integration, crash, power-cut and randomised tests, plus the controllable test server
 scripts/           End-to-end UI test, real-internet test, icon generator, license collector
-browser-extension/ Optional Chrome/Edge extension
+browser-extension/ Chrome/Edge extension: download capture and the right-click menu
 ```
 
 ### Environment variables (for testing)
@@ -298,7 +324,7 @@ browser-extension/ Optional Chrome/Edge extension
 | --- | --- |
 | `HAUL_USER_DATA_DIR` | Store the database and logs in this folder instead of `%APPDATA%\Haul Download Manager`. |
 | `HAUL_DOWNLOAD_DIR` | Default download folder on first run (instead of your Downloads folder). |
-| `HAUL_DISABLE_PROTOCOL=1` | Do not register the `haul://` link handler. |
+| `HAUL_DISABLE_PROTOCOL=1` | Do not register the `haul://` link handler or the browser extension's native messaging host. |
 | `HAUL_NO_TOOL_DOWNLOADS=1` | Never download yt-dlp, FFmpeg or Deno (used by the automated tests). |
 | `HAUL_YTDLP_COMMAND` | JSON array, e.g. `["node.exe","dist/tests/fixtures/fakeYtDlp.js"]`: run this instead of yt-dlp (used by the offline end-to-end test). |
 | `HAUL_FAKE_SHUTDOWN=1` | "Shut down when done" only writes a log line instead of shutting down the PC (used by the end-to-end test). |

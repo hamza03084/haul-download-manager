@@ -172,3 +172,43 @@ export function parseRetryAfter(header: string | undefined, now = Date.now()): n
 export function isStrongEtag(etag: string | null | undefined): etag is string {
   return !!etag && !etag.startsWith('W/');
 }
+
+/** HTTP error status from the server. */
+export class HttpStatusError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly retryable: boolean,
+    readonly retryAfterMs: number | null,
+  ) {
+    super(message);
+    this.name = 'HttpStatusError';
+  }
+}
+
+const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+export function httpError(status: number, res: IncomingMessage): HttpStatusError {
+  const retryAfter = parseRetryAfter(header(res, 'retry-after'));
+  const messages: Record<number, string> = {
+    400: 'The server rejected the request (HTTP 400).',
+    401: 'The server requires you to sign in (HTTP 401). Download the file from your browser instead.',
+    403: 'Access denied (HTTP 403). The link may have expired or require signing in.',
+    404: 'File not found on the server (HTTP 404).',
+    410: 'The file is no longer available (HTTP 410).',
+    429: 'The server is limiting requests (HTTP 429).',
+  };
+  let msg = messages[status] ?? (status >= 500 ? `Server error (HTTP ${status}).` : `Unexpected server response (HTTP ${status}).`);
+  if (retryAfter !== null && retryAfter > 60_000) msg += ` The server asked to wait ${Math.ceil(retryAfter / 60_000)} min before retrying.`;
+  return new HttpStatusError(status, msg, RETRYABLE_STATUSES.has(status), retryAfter);
+}
+
+export function header(res: IncomingMessage, name: string): string | undefined {
+  const v = res.headers[name];
+  return Array.isArray(v) ? v[0] : v;
+}
+
+export function parseLength(v: string | undefined): number | null {
+  if (!v || !/^\d+$/.test(v.trim())) return null;
+  return Number(v.trim());
+}

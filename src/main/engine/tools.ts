@@ -1,4 +1,4 @@
-// Downloads the free tools YouTube downloads need (yt-dlp, FFmpeg, Deno) from their official GitHub
+// Downloads the free tools video downloads need (yt-dlp, FFmpeg, Deno) from their official GitHub
 // releases into Haul's own folder, and keeps yt-dlp up to date (YouTube changes often and an old
 // yt-dlp stops working). Every file is checked against the SHA-256 sum its project publishes before it
 // is used. Nothing is installed system-wide and no administrator rights are needed.
@@ -197,7 +197,7 @@ export class ToolInstaller extends EventEmitter {
         await fsp.rm(path.join(this.dir, STAGING), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(() => {});
         this.setStatus({ state: 'idle', tool: null, received: 0, total: null, error: null }, true);
       } catch (e) {
-        const msg = e instanceof ToolInstallError ? e.message : `Could not get the tools YouTube needs: ${(e as Error).message}`;
+        const msg = e instanceof ToolInstallError ? e.message : `Could not get the tools video downloads need: ${(e as Error).message}`;
         this.log.warn(`tools: ${msg}`);
         this.setStatus({ state: 'failed', tool: null, received: 0, total: null, error: msg }, true);
         throw new ToolInstallError(msg);
@@ -365,7 +365,7 @@ export class ToolInstaller extends EventEmitter {
 
 function httpError(status: number): Error {
   const msg = `the server answered HTTP ${status}.`;
-  return status === 429 || status >= 500 ? new NetworkError(msg) : new ToolInstallError(`Could not download the tools YouTube needs: ${msg}`);
+  return status === 429 || status >= 500 ? new NetworkError(msg) : new ToolInstallError(`Could not download the tools video downloads need: ${msg}`);
 }
 
 function asNetworkError(e: unknown): Error {

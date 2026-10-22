@@ -38,6 +38,20 @@ export interface DownloadRecord {
    * `directory` once its file name is known. Cleared as soon as that has been done.
    */
   autoCategory: boolean;
+  /**
+   * For downloads fetched with several connections: the parts of the file and how much of each is
+   * safely on disk. null for downloads written front to back with one connection.
+   */
+  segments: Segment[] | null;
+  /** Page the link was found on (sent as the Referer header); set by the browser extension. */
+  referrer: string | null;
+}
+
+/** One part of a file fetched by its own connection: bytes [start, end), of which `done` are durable. */
+export interface Segment {
+  start: number;
+  end: number;
+  done: number;
 }
 
 export interface DownloadView extends DownloadRecord {
@@ -49,6 +63,8 @@ export interface DownloadView extends DownloadRecord {
   fileExists: boolean;
   /** What a running media download is doing right now, e.g. "Downloading audio (2 of 2)". */
   phase: string | null;
+  /** Connections open for this download right now (0 when not downloading). */
+  connections: number;
 }
 
 export interface Settings {
@@ -67,9 +83,13 @@ export interface Settings {
   startWithWindows: boolean;
   /** Closing the window keeps Haul running in the notification area instead of quitting. */
   closeToTray: boolean;
+  /** Connections used for one file (parts downloaded at the same time), 1 to MAX_CONNECTIONS. */
+  connections: number;
 }
 
 export const MAX_CONCURRENT_LIMIT = 10;
+/** Most connections per file. More rarely helps, and many servers refuse it. */
+export const MAX_CONNECTIONS = 16;
 /** Highest accepted speed limit: 1 GB/s (anything above is "no limit" in practice). */
 export const MAX_SPEED_LIMIT = 1024 * 1024 * 1024;
 
@@ -83,6 +103,7 @@ export const SETTINGS_DEFAULTS: Omit<Settings, 'downloadDirectory'> = {
   categoriesEnabled: false,
   startWithWindows: false,
   closeToTray: false,
+  connections: 4,
 };
 
 /** "Shut down the PC when downloads finish": whether it is armed, and the countdown once everything is done. */
@@ -126,19 +147,27 @@ export interface MediaSpec extends MediaChoice {
 }
 
 export interface MediaQuality {
+  /** Video height in pixels; 0 for "best available" when the site does not say. */
   height: number;
   fps: number | null;
   /** Codec family yt-dlp is expected to pick at this height, e.g. "H.264", "VP9", "AV1". */
   codec: string;
   label: string;
-  /** Estimated bytes of the video stream alone. */
+  /** Estimated bytes of `formatId` (the video stream alone, or video with sound when `hasAudio`). */
   videoBytes: number | null;
+  /** Stream used for "video + sound": a video-only stream to join with the audio, or one that has sound. */
   formatId: string;
+  /** True when `formatId` already contains the sound track (common outside YouTube). */
+  hasAudio: boolean;
+  /** Video-only stream for the "video only" choice, if the site offers one at this height. */
+  videoOnlyFormatId: string | null;
 }
 
 /** Result of asking yt-dlp what a video page offers. */
 export interface MediaInfo {
   url: string;
+  /** Name of the site as yt-dlp reports it, e.g. "YouTube", "Vimeo". */
+  site: string;
   videoId: string;
   title: string;
   uploader: string | null;
@@ -181,6 +210,8 @@ export interface AddDownloadRequest {
   url: string;
   directory?: string;
   fileName?: string;
+  /** Page the link came from (browser extension); sent as the Referer header. */
+  referrer?: string;
   /** Add in the paused state instead of queueing immediately. */
   startPaused?: boolean;
   /** For video pages: the choice from the quality picker plus what the probe reported. */
@@ -227,14 +258,64 @@ export interface HaulApi {
   onAddRequest(cb: (url: string) => void): () => void;
 }
 
-/** Hosts whose links are video pages handled through yt-dlp rather than direct downloads. */
-export const MEDIA_PAGE_HOSTS = /(^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be)$/i;
+/** Sites whose links are video (or audio) pages handled through yt-dlp rather than direct downloads. */
+export const MEDIA_SITES: { name: string; hosts: RegExp }[] = [
+  { name: 'YouTube', hosts: /(^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be)$/i },
+  { name: 'Vimeo', hosts: /(^|\.)vimeo\.com$/i },
+  { name: 'Dailymotion', hosts: /(^|\.)(dailymotion\.com|dai\.ly)$/i },
+  { name: 'Twitch', hosts: /(^|\.)twitch\.tv$/i },
+  { name: 'TikTok', hosts: /(^|\.)tiktok\.com$/i },
+  { name: 'X', hosts: /(^|\.)(twitter\.com|x\.com)$/i },
+  { name: 'Facebook', hosts: /(^|\.)(facebook\.com|fb\.watch)$/i },
+  { name: 'Instagram', hosts: /(^|\.)instagram\.com$/i },
+  { name: 'Reddit', hosts: /(^|\.)(reddit\.com|redd\.it)$/i },
+  { name: 'Streamable', hosts: /(^|\.)streamable\.com$/i },
+  { name: 'Bilibili', hosts: /(^|\.)(bilibili\.com|b23\.tv)$/i },
+  { name: 'Rumble', hosts: /(^|\.)rumble\.com$/i },
+  { name: 'Odysee', hosts: /(^|\.)odysee\.com$/i },
+  { name: 'SoundCloud', hosts: /(^|\.)soundcloud\.com$/i },
+  { name: 'Bandcamp', hosts: /(^|\.)bandcamp\.com$/i },
+  { name: 'TED', hosts: /(^|\.)ted\.com$/i },
+  { name: 'VK', hosts: /(^|\.)(vk\.com|vkvideo\.ru)$/i },
+  { name: 'OK.ru', hosts: /(^|\.)ok\.ru$/i },
+  { name: 'Internet Archive', hosts: /(^|\.)archive\.org$/i },
+];
 
-export function isMediaPageUrl(input: string): boolean {
+/** Services that protect their streams with DRM. Getting around that is not allowed, so Haul refuses them. */
+export const DRM_SITES: { name: string; hosts: RegExp }[] = [
+  { name: 'Netflix', hosts: /(^|\.)netflix\.com$/i },
+  { name: 'Disney+', hosts: /(^|\.)disneyplus\.com$/i },
+  { name: 'Prime Video', hosts: /(^|\.)primevideo\.com$/i },
+  { name: 'Max', hosts: /(^|\.)(hbomax\.com|max\.com)$/i },
+  { name: 'Hulu', hosts: /(^|\.)hulu\.com$/i },
+  { name: 'Spotify', hosts: /(^|\.)spotify\.com$/i },
+  { name: 'Peacock', hosts: /(^|\.)peacocktv\.com$/i },
+  { name: 'Paramount+', hosts: /(^|\.)paramountplus\.com$/i },
+  { name: 'Apple TV', hosts: /^tv\.apple\.com$/i },
+  { name: 'Crunchyroll', hosts: /(^|\.)crunchyroll\.com$/i },
+];
+
+/** Direct file links on a video site (for example an image on Reddit's image host) are plain downloads. */
+const DIRECT_FILE = /\.(mp4|m4v|webm|mkv|mov|mp3|m4a|ogg|opus|flac|wav|jpe?g|png|gif|webp|pdf|zip|7z|rar|gz|iso|exe|msi|torrent)$/i;
+
+/** The name of the video site a page link belongs to, or null for links that are (or may be) files. */
+export function mediaSiteOf(url: URL): string | null {
+  const site = MEDIA_SITES.find((s) => s.hosts.test(url.hostname));
+  if (!site) return null;
+  if (site.name !== 'YouTube' && DIRECT_FILE.test(url.pathname)) return null;
+  return site.name;
+}
+
+export function drmSiteOf(url: URL): string | null {
+  return DRM_SITES.find((s) => s.hosts.test(url.hostname))?.name ?? null;
+}
+
+/** For the UI: which site a typed link belongs to, or null when it should be downloaded as a file. */
+export function mediaSiteOfUrl(input: string): string | null {
   try {
     const u = new URL(input.trim());
-    return (u.protocol === 'https:' || u.protocol === 'http:') && MEDIA_PAGE_HOSTS.test(u.hostname);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? mediaSiteOf(u) : null;
   } catch {
-    return false;
+    return null;
   }
 }

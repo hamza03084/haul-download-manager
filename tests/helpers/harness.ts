@@ -24,12 +24,15 @@ export interface Harness {
   events: DownloadView[];
 }
 
-export function createHarness(opts: Partial<ManagerOptions> & { dir?: string; dbFile?: string; maxConcurrent?: number } = {}): Harness {
+export function createHarness(
+  opts: Partial<ManagerOptions> & { dir?: string; dbFile?: string; maxConcurrent?: number; connections?: number } = {},
+): Harness {
   const dir = opts.dir ?? tempDir();
   const dbFile = opts.dbFile ?? path.join(dir, '.state', 'test.db');
+  // One connection unless a test asks for more: the single-connection suite keeps testing that path.
   const manager = new DownloadManager({
     store: new SqliteStore(dbFile),
-    defaultSettings: { ...SETTINGS_DEFAULTS, downloadDirectory: dir, maxConcurrent: opts.maxConcurrent ?? 3 },
+    defaultSettings: { ...SETTINGS_DEFAULTS, downloadDirectory: dir, maxConcurrent: opts.maxConcurrent ?? 3, connections: opts.connections ?? 1 },
     timeoutMs: 5_000,
     retryDelaysMs: [50, 100, 150],
     progressIntervalMs: 50,

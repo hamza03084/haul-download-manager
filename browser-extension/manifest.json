@@ -1,9 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Send to Haul Download Manager",
-  "version": "1.0.0",
-  "description": "Adds a \"Download with Haul\" item to the right-click menu of links. The link opens in the Haul desktop app for you to confirm.",
-  "permissions": ["contextMenus"],
+  "name": "Haul Download Manager",
+  "version": "2.0.0",
+  "description": "Sends your downloads to the Haul desktop app: automatically when a download starts, or from the right-click menu of a link.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvZqidUQILvmlFAC+hLu71Alb5Sgdt0L1aCfl1ewbKzkFui19iSoaHV1BXUs3JvejCdF6gW0fVav30UMXkGyfdyFkQR4UbudTLd4iBm9k7+ieBk7heYeoy41gmsoeKqAFvAMZYtZEKlForIjSvBJfPRdj77xqrR2WKDVxzYBCXmcQcMJZpTNIm0LSL6N7fms/HxY8EPxNmmKgIWQCk2Kwl8yAVaAQIvgqr5hTy4XuEuy/SweDIrsUEgoFnp/d6Zd31TDrQEXQliZb9Gav5oY7gNzYUZ1WPP76njTRcaaNE6i6befW7X43djRMYk6uFWf6rSeRIxH+Ow0UHQ98SMCMsQIDAQAB",
+  "permissions": ["contextMenus", "downloads", "nativeMessaging", "storage"],
   "background": { "service_worker": "background.js" },
+  "options_ui": { "page": "options.html", "open_in_tab": false },
+  "action": { "default_title": "Haul Download Manager", "default_popup": "options.html" },
   "icons": { "128": "icon128.png" }
 }

@@ -3,7 +3,7 @@
 // whose built-in CRC-32 checksums prove that a resumed download is byte-for-byte intact.
 // Not part of `npm test` or CI: it needs internet access and downloads ~400 MB.
 //
-//   node scripts/live-test.mjs --exe "<path to Haul Download Manager.exe>" [--ytdlp "<path to yt-dlp.exe>"] [--only youtube,crash,pause,ratelimit]
+//   node scripts/live-test.mjs --exe "<path to Haul Download Manager.exe>" [--ytdlp "<path to yt-dlp.exe>"] [--only youtube,site,crash,pause,ratelimit]
 //
 // Scenarios
 //   youtube    With --ytdlp (ffmpeg, ffprobe and deno in the same folder): downloads a Creative Commons YouTube
@@ -13,7 +13,11 @@
 //              power cut: no shutdown code runs), relaunches, and checks that it continues from the
 //              partial file (Range request in the log) and that the archive passes its CRC check.
 //   pause      Starts a 275 MB 1080p video, pauses it with the Pause button, resumes, verifies CRC.
+//   site       With --ytdlp: downloads a public-domain video from the Internet Archive (Big Buck Bunny, served
+//              as plain MP4 files with the sound built in) through the picker and checks it with ffprobe/ffmpeg.
+//              (Vimeo was the first choice, but its web client now needs a signed-in account for yt-dlp.)
 //   ratelimit  Adds a Wikimedia Commons video; records how the app reports the server's rate limit.
+// The crash and pause downloads run with the default 4 connections per download (parts), and record it.
 // Uses an isolated profile and download folder in %TEMP%; never touches your real Haul data.
 import { chromium } from 'playwright-core';
 import { execFileSync, spawn } from 'node:child_process';
@@ -33,7 +37,7 @@ if (!exe || !fs.existsSync(exe)) {
   console.error('Usage: node scripts/live-test.mjs --exe "<path to Haul Download Manager.exe>"');
   process.exit(2);
 }
-const only = (arg('--only') ?? 'youtube,crash,pause').split(',');
+const only = (arg('--only') ?? 'youtube,site,crash,pause').split(',');
 const ytDlp = arg('--ytdlp') && path.resolve(arg('--ytdlp'));
 const ffprobeExe = ytDlp && path.join(path.dirname(ytDlp), 'ffprobe.exe');
 const ffmpegExe = ytDlp && path.join(path.dirname(ytDlp), 'ffmpeg.exe');
@@ -58,9 +62,11 @@ const FILES = {
     name: 'Glass_Half_-_Blender_Open_Movie-full_movie.webm',
   },
 };
-// Blender's official upload of Big Buck Bunny (Creative Commons Attribution).
+// Blender's official uploads of Big Buck Bunny (Creative Commons Attribution).
 const YOUTUBE = 'https://www.youtube.com/watch?v=aqz-KE-bpKQ';
+const SITE_VIDEO = 'https://archive.org/details/BigBuckBunny_124';
 
+class SkipScenario extends Error {}
 const results = [];
 const record = (name, status, detail = '') => {
   results.push({ name, status, detail });
@@ -241,6 +247,7 @@ try {
   s = await launch();
 
   // --------------------------------------------- YouTube through a real yt-dlp
+  try {
   if (only.includes('youtube')) {
     if (!ytDlp) {
       record('youtube: real yt-dlp scenario', 'SKIP', 'pass --ytdlp <path to yt-dlp.exe> (with ffmpeg/ffprobe/deno next to it) to run it');
@@ -254,7 +261,14 @@ try {
       // 1. 720p60 (~161 MB): hard kill mid-download, relaunch, pause, resume.
       const t0 = Date.now();
       await add(s.win, YOUTUBE);
-      await s.win.locator('.picker-row').first().waitFor({ timeout: 120_000 });
+      await s.win.locator('.picker-row, .picker-error').first().waitFor({ timeout: 120_000 });
+      if (await s.win.locator('.picker-error').count()) {
+        // YouTube refuses from time to time (its "not a bot" check): record it instead of aborting.
+        const why = (await s.win.locator('.picker-error').textContent())?.replace(/\s+/g, ' ').trim();
+        record('youtube: real yt-dlp scenario', 'SKIP', `YouTube refused the lookup, Haul explained it: "${why}"`);
+        await s.win.getByRole('button', { name: 'Close' }).click();
+        throw new SkipScenario();
+      }
       const qualities = await s.win.locator('.picker-row .picker-q').allTextContents();
       record('youtube: quality picker lists the real formats', qualities.length >= 6 ? 'PASS' : 'FAIL', `${qualities.join(', ')} (lookup took ${Math.round((Date.now() - t0) / 1000)} s)`);
       await s.win.screenshot({ path: path.join(work, 'youtube-picker.png') });
@@ -335,6 +349,53 @@ try {
       await s.win.screenshot({ path: path.join(work, 'youtube-done.png') });
     }
   }
+  } catch (e) {
+    if (!(e instanceof SkipScenario)) throw e;
+  }
+
+  // --------------------------------------------- another site through a real yt-dlp
+  if (only.includes('site')) {
+    if (!ytDlp) {
+      record('site: real yt-dlp scenario', 'SKIP', 'pass --ytdlp <path to yt-dlp.exe> to run it');
+    } else {
+      await s.win.getByRole('button', { name: 'Settings' }).click();
+      await s.win.getByLabel('Location of yt-dlp.exe').fill(ytDlp);
+      await s.win.getByRole('button', { name: 'Save settings' }).click();
+      await s.win.locator('.sheet').waitFor({ state: 'detached' });
+      const t0 = Date.now();
+      await add(s.win, SITE_VIDEO);
+      await s.win.locator('.picker-row, .picker-error').first().waitFor({ timeout: 120_000 });
+      if (await s.win.locator('.picker-error').count()) {
+        const why = (await s.win.locator('.picker-error').textContent())?.replace(/\s+/g, ' ').trim();
+        record('site: real yt-dlp scenario', 'SKIP', `the site refused the lookup, Haul explained it: "${why}"`);
+        await s.win.getByRole('button', { name: 'Close' }).click();
+      } else {
+      const site = (await s.win.locator('.picker-kicker').textContent())?.trim();
+      const rows = await s.win.locator('.picker-row').allTextContents();
+      record('site: the picker opens for an Internet Archive link and lists its sizes', site === 'Internet Archive' && rows.length >= 1 ? 'PASS' : 'FAIL', `${site}: ${rows.map((r) => r.replace(/\s+/g, ' ').trim()).join(' | ')} (lookup took ${Math.round((Date.now() - t0) / 1000)} s)`);
+      await s.win.screenshot({ path: path.join(work, 'site-picker.png') });
+      const videoOnlyDisabled = await s.win.getByRole('tab', { name: 'Video only' }).isDisabled();
+      record('site: "video only" availability (the site serves picture and sound together)', 'INFO', videoOnlyDisabled ? 'unavailable, as expected for combined streams' : 'available (separate streams offered)');
+      // The 360p MP4 (59 MB) rather than the preselected 720p AVI (317 MB): same code path, far quicker.
+      await s.win.locator('.picker-row', { hasText: '360p' }).click();
+      await s.win.locator('.picker .btn-accent').click();
+      await sleep(1000);
+      // Haul names the file after the stream it really got (an .avi stays .avi), so find the card by
+      // its title rather than its first name, and read the final name from the card afterwards.
+      const siteTitle = ((await s.win.locator('article.card .card-name').first().textContent())?.trim() ?? '').replace(/\.[a-z0-9]+$/i, '');
+      const stateV = await waitFinal(s.win, siteTitle, 20 * 60_000);
+      const siteName = (await card(s.win, siteTitle).locator('.card-name').first().textContent())?.trim() ?? '';
+      const vfile = path.join(downloads, siteName);
+      const probeV = ffprobe(vfile);
+      const decV = decodeCheck(vfile);
+      record(
+        'site: the video is a complete MP4 with picture and sound that decodes cleanly',
+        stateV === 'Done' && probeV.ok && probeV.video && probeV.audio && decV.ok ? 'PASS' : 'FAIL',
+        `${siteName}: ${mb(size(vfile) ?? 0)}; ${probeV.summary}; ${decV.detail}; card: ${await cardText(s.win, siteName)}`,
+      );
+      }
+    }
+  }
 
   // ------------------------------------------------- crash mid-download, resume
   if (only.includes('crash')) {
@@ -343,7 +404,15 @@ try {
     let peak = 0;
     const tick = () => (peak = Math.max(peak, workingSet(s.pid) ?? 0));
     const t0 = Date.now();
-    const pct = await waitPct(s.win, f.name, 35, 15 * 60_000, tick);
+    let connectionsSeen = 0;
+    const pct = await waitPct(s.win, f.name, 35, 15 * 60_000, () => {
+      tick();
+      void card(s.win, f.name).locator('.meta-text').textContent({ timeout: 1000 }).then((t) => {
+        const m = /(\d+) connections/.exec(t ?? '');
+        if (m) connectionsSeen = Math.max(connectionsSeen, Number(m[1]));
+      }).catch(() => {});
+    });
+    record('parts: the Blender server serves the file in parts over several connections', connectionsSeen >= 2 ? 'PASS' : 'FAIL', `${connectionsSeen} connections shown on the card at ${pct}%`);
     const part = path.join(downloads, `${f.name}.haulpart`);
     const before = size(part);
     await s.kill();
@@ -380,7 +449,10 @@ try {
     await card(s.win, f.name).getByRole('button', { name: 'Resume' }).click();
     const state = await waitFinal(s.win, f.name, 15 * 60_000);
     const log = fs.readFileSync(logFile, 'utf8');
-    record('pause: resume sent a Range request from the paused position', log.includes(`from byte ${p1}`) ? 'PASS' : 'FAIL', `expected "from byte ${p1}" in the log`);
+    // In parts, the resume continues the first unfinished part, and the other parts follow from their own positions.
+    const resumeLines = [...log.matchAll(/ INFO {2}request \S+ \S+ from byte (\d+)/g)].map((m) => Number(m[1]));
+    const partsLines = [...log.matchAll(/(\d+) part\(s\) with up to (\d+) connections/g)].map((m) => `${m[1]} parts/${m[2]} conn`);
+    record('pause: resume continued from the paused data (Range request) instead of starting over', resumeLines.some((b) => b > 0) ? 'PASS' : 'FAIL', `from byte ${resumeLines.join(', ') || 'none'}; parts: ${partsLines.join(', ') || 'none'}`);
     const final = path.join(downloads, f.name);
     const zip = await verifyZip(final);
     record('pause: resumed 275 MB 1080p video archive is intact (CRC-32)', state === 'Done' && size(final) === f.size && zip.ok ? 'PASS' : 'FAIL', `state=${state} size=${size(final)}/${f.size}; ${zip.detail}`);

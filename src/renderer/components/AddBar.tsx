@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ClipboardEvent, type FormEvent } from 'react';
-import { isMediaPageUrl, type Settings } from '../../shared/types';
+import { mediaSiteOfUrl, type Settings } from '../../shared/types';
 import { api } from '../api';
 import { IconArrowDown, IconChevron, IconClipboard, IconClose, IconFolder } from './Icons';
 import { MediaPicker } from './MediaPicker';
@@ -7,6 +7,8 @@ import { MediaPicker } from './MediaPicker';
 export interface AddBarHandle {
   focus(): void;
   prefill(url: string, fromBrowser?: boolean): void;
+  /** Opens the quality picker for a page that is not on the list of known video sites. */
+  pickVideo(url: string): void;
 }
 
 interface Props {
@@ -61,6 +63,11 @@ export const AddBar = forwardRef<AddBarHandle, Props>(function AddBar({ settings
       setFromBrowser(browser);
       input.current?.focus();
     },
+    pickVideo: (u) => {
+      setBatch(null);
+      setError(null);
+      setPicking(normalize(u));
+    },
   }));
 
   // Offer a link found on the clipboard when the window gains focus (never added automatically).
@@ -111,7 +118,7 @@ export const AddBar = forwardRef<AddBarHandle, Props>(function AddBar({ settings
       setError('This link is already in your list and has not finished yet. Press Haul it again if you want a second copy.');
       return;
     }
-    if (!batch && isMediaPageUrl(urls[0])) {
+    if (!batch && mediaSiteOfUrl(urls[0])) {
       // Video pages need a quality choice: the picker asks yt-dlp what is available.
       setConfirmedDuplicate(null);
       setError(null);
@@ -119,9 +126,9 @@ export const AddBar = forwardRef<AddBarHandle, Props>(function AddBar({ settings
       return;
     }
     if (batch) {
-      const pages = urls.filter((u) => isMediaPageUrl(u));
-      if (pages.length) notify(`Skipped ${pages.length} YouTube link(s): add them one at a time to choose a quality.`);
-      const fresh = urls.filter((u) => !unfinishedUrls.has(normalize(u)) && !isMediaPageUrl(u));
+      const pages = urls.filter((u) => mediaSiteOfUrl(u));
+      if (pages.length) notify(`Skipped ${pages.length} video page link(s): add them one at a time to choose a quality.`);
+      const fresh = urls.filter((u) => !unfinishedUrls.has(normalize(u)) && !mediaSiteOfUrl(u));
       if (fresh.length < urls.length - pages.length) notify(`Skipped ${urls.length - pages.length - fresh.length} link(s) that are already in your list.`);
       if (fresh.length === 0) {
         reset();

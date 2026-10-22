@@ -33,16 +33,24 @@ export interface RouteSpec {
   /** Stop sending for `stallMs` once this many body bytes have been sent (connection stays open). */
   stallAfter?: number;
   stallMs?: number;
+  /** Refuse (HTTP 429) any request while this many responses for the route are still being sent. */
+  maxParallel?: number;
+  /** Serve this status to every Range request (a server that supports ranges only sometimes). */
+  rangeStatus?: number;
+  /** Honour ranges without saying so (no Accept-Ranges header), as many servers do. Default true. */
+  advertiseRanges?: boolean;
 }
 
 export interface LoggedRequest {
   path: string;
   headers: http.IncomingHttpHeaders;
+  /** How many responses for the same route were still being sent when this request arrived. */
+  concurrent: number;
 }
 
 export class TestServer {
   private server = http.createServer((req, res) => this.handle(req, res));
-  private routes = new Map<string, RouteSpec & { served: number }>();
+  private routes = new Map<string, RouteSpec & { served: number; inFlight: number }>();
   private sockets = new Set<import('node:net').Socket>();
   readonly requests: LoggedRequest[] = [];
   port = 0;
@@ -61,7 +69,7 @@ export class TestServer {
   }
 
   route(p: string, spec: RouteSpec): RouteSpec {
-    const r = { served: 0, ...spec };
+    const r = { served: 0, inFlight: 0, ...spec };
     this.routes.set(p, r);
     return r;
   }
@@ -77,12 +85,22 @@ export class TestServer {
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const pathOnly = (req.url ?? '/').split('?')[0];
-    this.requests.push({ path: pathOnly, headers: req.headers });
     const spec = this.routes.get(pathOnly);
+    this.requests.push({ path: pathOnly, headers: req.headers, concurrent: spec?.inFlight ?? 0 });
     if (!spec) {
       res.writeHead(404, { 'Content-Type': 'text/plain' }).end('not found');
       return;
     }
+    if (spec.maxParallel !== undefined && spec.inFlight >= spec.maxParallel) {
+      res.writeHead(429, { 'Content-Type': 'text/plain', 'Retry-After': '1' }).end('too many connections');
+      return;
+    }
+    if (spec.rangeStatus && req.headers.range) {
+      res.writeHead(spec.rangeStatus, { 'Content-Type': 'text/plain' }).end(`status ${spec.rangeStatus}`);
+      return;
+    }
+    spec.inFlight++;
+    res.once('close', () => spec.inFlight--);
     const nth = spec.served++;
     if (spec.hang) return;
     if (spec.redirectTo) {
@@ -99,7 +117,7 @@ export class TestServer {
     const headers: Record<string, string> = { 'Content-Type': 'application/octet-stream', ...spec.headers };
     if (spec.etag) headers.ETag = spec.etag;
     if (spec.lastModified) headers['Last-Modified'] = spec.lastModified;
-    if (ranges) headers['Accept-Ranges'] = 'bytes';
+    if (ranges && (spec.advertiseRanges ?? true)) headers['Accept-Ranges'] = 'bytes';
 
     if (spec.lieAboutRange && req.headers.range) {
       headers['Content-Range'] = `bytes 0-${body.length - 1}/${body.length}`;
@@ -108,23 +126,25 @@ export class TestServer {
       return;
     }
     let start = 0;
+    let end = body.length; // exclusive
     let status = 200;
     const range = req.headers.range;
     const ifRange = req.headers['if-range'];
     const ifRangeOk = !ifRange || ifRange === spec.etag || ifRange === spec.lastModified;
     if (ranges && range && ifRangeOk) {
-      const m = /^bytes=(\d+)-$/.exec(range);
+      const m = /^bytes=(\d+)-(\d*)$/.exec(range);
       if (m) {
         start = Number(m[1]);
-        if (start >= body.length) {
+        if (m[2]) end = Math.min(body.length, Number(m[2]) + 1);
+        if (start >= body.length || start >= end) {
           res.writeHead(416, { 'Content-Range': `bytes */${body.length}` }).end();
           return;
         }
         status = 206;
-        headers['Content-Range'] = `bytes ${start}-${body.length - 1}/${body.length}`;
+        headers['Content-Range'] = `bytes ${start}-${end - 1}/${body.length}`;
       }
     }
-    const slice = body.subarray(start);
+    const slice = body.subarray(start, end);
     if (!spec.chunked) headers['Content-Length'] = String(slice.length);
     res.writeHead(status, headers);
 

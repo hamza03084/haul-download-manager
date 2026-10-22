@@ -109,3 +109,9 @@ export const BrandMark = (p: P) => (
     <path d="M9 9h14M16 9v12M10.5 16.5 16 22l5.5-5.5" stroke="var(--accent-ink)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
   </svg>
 );
+export const IconVideo = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="3" y="6" width="13" height="12" rx="2" />
+    <path d="M16 10l5-3v10l-5-3z" />
+  </svg>
+);

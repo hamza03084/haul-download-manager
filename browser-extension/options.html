@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Haul Download Manager</title>
+    <style>
+      body { font: 14px/1.45 system-ui, sans-serif; margin: 0; padding: 16px; min-width: 340px; max-width: 420px; color: #1d2229; background: #fff; }
+      @media (prefers-color-scheme: dark) { body { color: #e6e9ee; background: #1b2027; } input[type="text"], input[type="number"] { background: #0f1419; color: #e6e9ee; border-color: #3a424d; } }
+      h1 { font-size: 16px; margin: 0 0 4px; }
+      .status { margin: 0 0 14px; font-size: 13px; }
+      .ok { color: #1f8f4e; } .bad { color: #c2410c; }
+      label { display: block; margin: 10px 0; }
+      label.inline { display: flex; gap: 8px; align-items: center; }
+      input[type="text"], input[type="number"] { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #c8ced6; border-radius: 6px; font: inherit; }
+      input[type="number"] { width: 90px; }
+      small { display: block; color: #6b7480; margin-top: 2px; }
+      .saved { font-size: 12px; color: #6b7480; min-height: 16px; }
+    </style>
+  </head>
+  <body>
+    <h1>Haul Download Manager</h1>
+    <p class="status" id="status">Checking whether Haul can be reached…</p>
+
+    <label class="inline"><input type="checkbox" id="capture" /> <span><b>Send downloads to Haul automatically</b></span></label>
+    <small>When a download starts in the browser, Haul takes it over. Links with the right-click menu entry always go to Haul.</small>
+
+    <label>
+      File types to take over
+      <input type="text" id="extensions" spellcheck="false" />
+      <small>Separated by spaces. Other types stay with the browser, unless they are big:</small>
+    </label>
+    <label class="inline">
+      Also any file of at least <input type="number" id="minSizeMb" min="0" max="100000" /> MB
+    </label>
+    <small>0 = only the listed types.</small>
+    <label class="inline"><input type="checkbox" id="allTypes" /> <span>Take over every download, whatever its type or size</span></label>
+    <p class="saved" id="saved"></p>
+    <script src="options.js"></script>
+  </body>
+</html>

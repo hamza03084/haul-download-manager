@@ -3,7 +3,8 @@
 // the same output lines, `.part` files in the temp folder, resuming them, merging, moving the result
 // to the home folder and writing its path for --print-to-file. Test controls go in the URL query:
 //   vsize, asize   stream sizes in bytes        delay   ms to wait after each 32 KiB
-//   mode=unavailable | playlist | slowprobe     failat  fail with an HTTP 403 after this many bytes
+//   mode=unavailable | playlist | slowprobe | unsupported     failat  fail with an HTTP 403 after this many bytes
+//   site=vimeo | generic   answer the probe like another site (see tests/fixtures)
 //   mergedelay     ms spent "joining" video and sound
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -32,7 +33,14 @@ async function main(): Promise<number> {
       return 0;
     }
     if (q.get('mode') === 'slowprobe') await sleep(60_000);
-    const fixture = path.resolve(__dirname, '..', '..', '..', 'tests', 'fixtures', 'youtube-probe.json');
+    if (q.get('mode') === 'unsupported') {
+      process.stderr.write(`ERROR: Unsupported URL: ${url.href}
+`);
+      return 1;
+    }
+    // site=vimeo: streams with sound built in (as most sites serve); site=generic: one plain video file on a page.
+    const name = q.get('site') === 'vimeo' ? 'vimeo-probe.json' : q.get('site') === 'generic' ? 'generic-probe.json' : 'youtube-probe.json';
+    const fixture = path.resolve(__dirname, '..', '..', '..', 'tests', 'fixtures', name);
     const info = JSON.parse(fs.readFileSync(fixture, 'utf8'));
     if (q.get('title')) info.title = q.get('title');
     out(JSON.stringify(info));

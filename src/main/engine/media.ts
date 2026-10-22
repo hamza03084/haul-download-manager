@@ -1,11 +1,11 @@
-// Video pages (YouTube) through yt-dlp: finding the tools, asking what formats a video offers,
+// Video pages (YouTube, Vimeo and the other sites yt-dlp knows) through yt-dlp: finding the tools, asking what formats a video offers,
 // building the download command and reading its progress. Haul does not ship yt-dlp: it downloads it on
 // first use (see tools.ts) or uses a copy the user installed. No Electron imports: this runs and is
 // tested under plain Node.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { MediaInfo, MediaQuality, MediaSpec, MediaToolsStatus } from '../../shared/types';
+import { mediaSiteOf, type MediaInfo, type MediaQuality, type MediaSpec, type MediaToolsStatus } from '../../shared/types';
 
 export interface MediaTools {
   /** Command plus leading arguments that run yt-dlp (normally just the path of yt-dlp.exe). */
@@ -89,9 +89,9 @@ export function locateMediaTools(opts: {
   const node = deno ? null : findIn([ytDir, ...pathDirs], 'node');
   const jsRuntime = deno ? `deno:${deno}` : node ? `node:${node}` : null;
 
-  if (!problem && !ytDlp) problem = `YouTube downloads need yt-dlp, which was not found. ${INSTALL_HINT}`;
+  if (!problem && !ytDlp) problem = `Video downloads need yt-dlp, which was not found. ${INSTALL_HINT}`;
   else if (!problem && !ffmpeg && !opts.command?.length) {
-    problem = `YouTube downloads need FFmpeg (to join HD video with its sound), which was not found. ${INSTALL_HINT}`;
+    problem = `Video downloads need FFmpeg (to join HD video with its sound), which was not found. ${INSTALL_HINT}`;
   }
   const status: MediaToolsStatus = {
     ytDlp,
@@ -153,37 +153,86 @@ interface Fmt {
   audio_channels?: number | null;
   protocol?: string;
   format_note?: string | null;
+  url?: string;
 }
 
-const isVideo = (f: Fmt) => !!f.vcodec && f.vcodec !== 'none' && (f.height ?? 0) > 0;
-const isAudioOnly = (f: Fmt) => (!f.vcodec || f.vcodec === 'none') && !!f.acodec && f.acodec !== 'none';
+/** Streams yt-dlp can fetch by itself: plain files, HLS (m3u8) and DASH. RTMP and the like need extra tools. */
+const FETCHABLE = /^(https?|m3u8|m3u8_native|http_dash_segments|dash|websocket_frag)/i;
+const fetchable = (f: Fmt) => !!f.format_id && (!f.protocol || FETCHABLE.test(f.protocol));
+/** Plain files first: progress and sizes are exact, and no stream joining is needed. */
+const protocolRank = (f: Fmt) => (!f.protocol || /^https?$/i.test(f.protocol) ? 0 : /dash/i.test(f.protocol) ? 1 : 2);
+// Some sites (the Internet Archive, plain files found by the generic extractor) report only the
+// container, not the codecs. A video container then counts as picture with sound: only an explicit
+// "none" says a stream has no sound.
+const VIDEO_EXT = /^(mp4|webm|mkv|mov|flv|3gp|m4v|ts|ogv|avi|wmv|mpg|mpeg)$/i;
+const AUDIO_EXT = /^(m4a|mp3|ogg|oga|opus|aac|flac|wav)$/i;
+const hasVideo = (f: Fmt) => (f.vcodec ? f.vcodec !== 'none' : !!f.ext && VIDEO_EXT.test(f.ext));
+const hasAudio = (f: Fmt) => (f.acodec ? f.acodec !== 'none' : !!f.ext && (AUDIO_EXT.test(f.ext) || VIDEO_EXT.test(f.ext)));
+const isVideo = (f: Fmt) => hasVideo(f) && (f.height ?? 0) > 0;
+const isAudioOnly = (f: Fmt) => !hasVideo(f) && hasAudio(f);
 const sizeOf = (f: Fmt | undefined, duration: number | null) =>
   !f ? null : f.filesize ?? f.filesize_approx ?? (f.tbr && duration ? Math.round((f.tbr * 1000 * duration) / 8) : null);
 
 /** H.264 plays everywhere, VP9 on any current Windows, AV1 needs newer hardware or an extension. */
-function codecRank(vcodec: string): number {
+function codecRank(vcodec: string | null | undefined): number {
+  if (!vcodec) return 3;
   if (vcodec.startsWith('avc1') || vcodec.startsWith('h264')) return 0;
   if (vcodec.startsWith('vp9') || vcodec.startsWith('vp09')) return 1;
   if (vcodec.startsWith('av01')) return 2;
   return 3;
 }
-function codecName(vcodec: string): string {
-  return ['H.264', 'VP9', 'AV1'][codecRank(vcodec)] ?? vcodec.split('.')[0].toUpperCase();
+function codecName(f: Fmt): string {
+  const v = f.vcodec;
+  if (!v) return (f.ext ?? 'video').toUpperCase();
+  return ['H.264', 'VP9', 'AV1'][codecRank(v)] ?? v.split('.')[0].toUpperCase();
 }
 
-/** Video-only stream Haul picks for a height: highest frame rate, then the most compatible codec. */
+const byPreference = (a: Fmt, b: Fmt) =>
+  protocolRank(a) - protocolRank(b) || (b.fps ?? 0) - (a.fps ?? 0) || codecRank(a.vcodec) - codecRank(b.vcodec) || (sizeOf(a, null) ?? 0) - (sizeOf(b, null) ?? 0);
+
+/**
+ * Video-only stream Haul picks for a height: a plain file over HLS/DASH, then the highest frame rate,
+ * then the most compatible codec. YouTube and the bigger sites offer these; many sites do not.
+ */
 export function pickVideoFormat(formats: Fmt[], height: number): Fmt | undefined {
-  return formats
-    .filter((f) => isVideo(f) && f.acodec === 'none' && f.height === height && f.protocol?.startsWith('http') && f.format_id)
-    .sort((a, b) => (b.fps ?? 0) - (a.fps ?? 0) || codecRank(a.vcodec!) - codecRank(b.vcodec!) || (sizeOf(a, null) ?? 0) - (sizeOf(b, null) ?? 0))[0];
+  return formats.filter((f) => isVideo(f) && !hasAudio(f) && f.height === height && fetchable(f)).sort(byPreference)[0];
+}
+
+/** Stream with picture and sound in one, as most sites other than YouTube serve (no joining needed). */
+export function pickCombinedFormat(formats: Fmt[], height: number): Fmt | undefined {
+  return formats.filter((f) => isVideo(f) && hasAudio(f) && f.height === height && fetchable(f)).sort(byPreference)[0];
 }
 
 /** Audio stream Haul picks: stereo AAC (most compatible), avoiding loudness-compressed (DRC) copies. */
 export function pickAudioFormat(formats: Fmt[]): Fmt | undefined {
-  const audio = formats.filter((f) => isAudioOnly(f) && f.protocol?.startsWith('http') && f.format_id && !/drc/i.test(f.format_id + (f.format_note ?? '')));
-  const aac = audio.filter((f) => f.acodec!.startsWith('mp4a') && (f.audio_channels ?? 2) <= 2);
+  const audio = formats.filter((f) => isAudioOnly(f) && fetchable(f) && !/drc/i.test(f.format_id + (f.format_note ?? '')));
+  const aac = audio.filter((f) => (f.acodec ?? '').startsWith('mp4a') && (f.audio_channels ?? 2) <= 2);
   const pool = aac.length ? aac : audio;
-  return pool.sort((a, b) => (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0))[0];
+  return pool.sort((a, b) => protocolRank(a) - protocolRank(b) || (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0))[0];
+}
+
+/** How yt-dlp names the site, made readable ("Youtube" -> "YouTube", "TwitterSpaces" -> "Twitter Spaces"). */
+export function siteName(info: Record<string, unknown>, url: string): string {
+  const key = typeof info.extractor_key === 'string' ? info.extractor_key : typeof info.extractor === 'string' ? info.extractor : '';
+  const known: Record<string, string> = {
+    youtube: 'YouTube',
+    generic: 'this page',
+    tiktok: 'TikTok',
+    soundcloud: 'SoundCloud',
+    okru: 'OK.ru',
+    archiveorg: 'Internet Archive',
+    twitter: 'X',
+    dailymotion: 'Dailymotion',
+    bilibili: 'Bilibili',
+  };
+  const base = key.split(':')[0];
+  if (known[base.toLowerCase()]) return known[base.toLowerCase()];
+  if (base) return base.replace(/([a-z])([A-Z])/g, '$1 $2');
+  try {
+    return mediaSiteOf(new URL(url)) ?? 'this page';
+  } catch {
+    return 'this page';
+  }
 }
 
 export function summarizeInfo(raw: unknown, url: string): MediaInfo {
@@ -194,30 +243,54 @@ export function summarizeInfo(raw: unknown, url: string): MediaInfo {
   if (info.is_live === true || info.live_status === 'is_live' || info.live_status === 'is_upcoming') {
     throw new MediaError('Live streams and premieres cannot be downloaded until they have ended.');
   }
-  const formats = (Array.isArray(info.formats) ? info.formats : []) as Fmt[];
+  // A page with one plain video file (the generic extractor) reports it as the single "format".
+  const formats = (Array.isArray(info.formats) ? info.formats : typeof info.url === 'string' ? [info as Fmt] : []) as Fmt[];
   const duration = typeof info.duration === 'number' ? info.duration : null;
   const audio = pickAudioFormat(formats);
-  const heights = [...new Set(formats.filter((f) => isVideo(f) && f.acodec === 'none').map((f) => f.height!))].sort((a, b) => b - a);
+  const heights = [...new Set(formats.filter((f) => isVideo(f) && fetchable(f)).map((f) => f.height!))].sort((a, b) => b - a);
   const qualities: MediaQuality[] = [];
   for (const h of heights) {
     if (h < 144) continue;
-    const v = pickVideoFormat(formats, h);
-    if (!v) continue;
-    const fps = v.fps ? Math.round(v.fps) : null;
+    const separate = pickVideoFormat(formats, h);
+    const combined = pickCombinedFormat(formats, h);
+    // Video-only plus a separate audio stream gives the best picture (YouTube); otherwise the
+    // stream that has sound built in. Video only needs a stream without sound.
+    const chosen = separate && audio ? separate : combined ?? separate;
+    if (!chosen) continue;
+    const fps = chosen.fps ? Math.round(chosen.fps) : null;
     const tag = h >= 2160 ? ' (4K)' : h >= 1440 ? ' (2K)' : h >= 720 ? ' (HD)' : '';
     qualities.push({
       height: h,
       fps,
-      codec: codecName(v.vcodec!),
+      codec: codecName(chosen),
       label: `${h}p${fps && fps > 30 ? fps : ''}${tag}`,
-      videoBytes: sizeOf(v, duration),
-      formatId: v.format_id!,
+      videoBytes: sizeOf(chosen, duration),
+      formatId: chosen.format_id!,
+      hasAudio: chosen === combined,
+      videoOnlyFormatId: separate?.format_id ?? null,
     });
   }
-  if (qualities.length === 0 && !audio) throw new MediaError('yt-dlp found no downloadable formats for this video.');
+  if (qualities.length === 0) {
+    // Sites that do not say how tall their video is: let yt-dlp take the best it finds.
+    const best = formats.filter((f) => hasVideo(f) && fetchable(f)).sort(byPreference)[0];
+    if (best) {
+      qualities.push({
+        height: 0,
+        fps: null,
+        codec: codecName(best),
+        label: 'Best available',
+        videoBytes: sizeOf(best, duration),
+        formatId: best.format_id!,
+        hasAudio: hasAudio(best) || !audio,
+        videoOnlyFormatId: hasAudio(best) ? null : best.format_id!,
+      });
+    }
+  }
+  if (qualities.length === 0 && !audio) throw new MediaError('yt-dlp found no downloadable video or audio on this page.');
   const subs = (info.subtitles ?? {}) as Record<string, { name?: string }[]>;
   return {
     url,
+    site: siteName(info, url),
     videoId: String(info.id ?? ''),
     title: String(info.title ?? info.id ?? 'video'),
     uploader: typeof info.uploader === 'string' ? info.uploader : typeof info.channel === 'string' ? info.channel : null,
@@ -237,6 +310,12 @@ export function summarizeInfo(raw: unknown, url: string): MediaInfo {
 
 const PROGRESS_TEMPLATE =
   'download:[haul] %(progress.status)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(info.format_id)s';
+
+/**
+ * Containers whose usual codecs fit into MP4 are remuxed to MP4 (no re-encoding, so it is quick and
+ * lossless). Others (Ogg Theora, AVI, WMV…) would make the remux fail, so they are kept as they are.
+ */
+const REMUX_TO_MP4 = 'mov>mp4/m4v>mp4/3gp>mp4/ts>mp4/flv>mp4/mkv>mp4/webm>mp4';
 
 /** In yt-dlp output templates `%` starts a field, so literal percent signs in a title are doubled. */
 const literal = (s: string) => s.replace(/%/g, '%%');
@@ -278,17 +357,30 @@ export function buildDownloadArgs(
   if (o.tools.jsRuntime) args.push('--js-runtimes', o.tools.jsRuntime);
   // yt-dlp's own limiter, in bytes per second. It applies to this yt-dlp process only.
   if (o.rateLimit && o.rateLimit > 0) args.push('--limit-rate', String(Math.floor(o.rateLimit)));
-  const h = spec.height ?? 1080;
+  const h = spec.height || null; // 0 = best available (the site does not say how tall its video is)
   const alt = (...xs: (string | null | undefined | false)[]) => xs.filter(Boolean).join('/');
+  const atMost = (sel: string) => (h ? `${sel}[height<=${h}]` : sel);
+  // The codec preference (H.264 and AAC play everywhere) matters on YouTube, which offers several
+  // codecs per size. Elsewhere it is left out: sites whose streams have no IDs of their own get them
+  // numbered in sort order, so a sort would make the IDs from the picker point at other streams.
+  let site: string | null = null;
+  try {
+    site = mediaSiteOf(new URL(o.url));
+  } catch {
+    /* no site */
+  }
+  const sort = (...keys: string[]) => (site === 'YouTube' ? ['-S', (h ? [`res:${h}`, ...keys] : ['res', ...keys]).join(',')] : []);
   if (spec.mode === 'video') {
-    // The exact streams shown in the picker first; generic fallbacks if YouTube changed them since.
-    const exact = spec.videoFormatId && spec.audioFormatId && `${spec.videoFormatId}+${spec.audioFormatId}`;
-    args.push('-f', alt(exact, `bv*[height<=${h}]+ba`, `b[height<=${h}]`), '-S', `res:${h},fps,vcodec:h264,acodec:aac`);
-    args.push('--merge-output-format', 'mp4', '--remux-video', 'mp4');
+    // The exact streams shown in the picker first (a video stream plus a sound stream, or one stream
+    // with both); generic fallbacks if the site changed them since.
+    const exact = spec.videoFormatId && (spec.audioFormatId ? `${spec.videoFormatId}+${spec.audioFormatId}` : spec.videoFormatId);
+    args.push('-f', alt(exact, `${atMost('bv*')}+ba`, atMost('b')), ...sort('fps', 'vcodec:h264', 'acodec:aac'));
+    args.push('--merge-output-format', 'mp4', '--remux-video', REMUX_TO_MP4);
   } else if (spec.mode === 'video-only') {
-    args.push('-f', alt(spec.videoFormatId, `bv[height<=${h}]`), '-S', `res:${h},fps,vcodec:h264`, '--remux-video', 'mp4');
+    args.push('-f', alt(spec.videoFormatId, atMost('bv')), ...sort('fps', 'vcodec:h264'), '--remux-video', REMUX_TO_MP4);
   } else {
-    args.push('-f', alt(spec.audioFormatId, 'ba'), '-S', 'acodec:aac', '-x', '--audio-format', spec.audioFormat ?? 'm4a', '--audio-quality', '0');
+    // "ba" needs a separate sound stream; sites without one get the sound taken out of the best video.
+    args.push('-f', alt(spec.audioFormatId, 'ba', 'b'), ...(site === 'YouTube' ? ['-S', 'acodec:aac'] : []), '-x', '--audio-format', spec.audioFormat ?? 'm4a', '--audio-quality', '0');
   }
   if (spec.thumbnail) args.push('--write-thumbnail', '--convert-thumbnails', 'jpg');
   if (spec.subtitles) args.push('--write-subs', '--sub-langs', spec.subtitles, '--convert-subs', 'srt');
@@ -341,8 +433,11 @@ export function cleanError(stderr: string): string {
     .replace(/^\[[^\]]+\]\s*[\w-]{6,}:\s*/, '')
     .replace(/\s*\(caused by .*$/i, '');
   if (/confirm you.?re not a bot|sign in to confirm/i.test(msg)) {
-    msg = 'YouTube asked to confirm you are not a bot and refused the download. Wait a while and retry, or update yt-dlp (yt-dlp -U).';
-  } else if (/private video/i.test(msg)) msg = 'This video is private.';
+    msg = 'The site asked to confirm you are not a bot and refused the download. Wait a while and retry, or update yt-dlp (yt-dlp -U).';
+  } else if (/unsupported url/i.test(msg)) msg = 'yt-dlp found no video on this page (unsupported site or link). Try the link of the video itself.';
+  else if (/requested format is not available/i.test(msg)) msg = 'The chosen quality is no longer offered by the site. Remove the download and add the link again.';
+  else if (/login required|log in|requires? (an? )?account|logged.in/i.test(msg)) msg = 'This video needs a signed-in account, which Haul does not use.';
+  else if (/private video/i.test(msg)) msg = 'This video is private.';
   else if (/members-only|join this channel/i.test(msg)) msg = 'This video is for channel members only.';
   else if (/age/i.test(msg) && /sign in|confirm/i.test(msg)) msg = 'This video is age-restricted and needs a signed-in account, which Haul does not use.';
   else if (/video unavailable|not available/i.test(msg)) msg = `The video is not available: ${msg}`;

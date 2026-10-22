@@ -327,7 +327,7 @@ describe('change link', () => {
     assert.ok(read(done).equals(body));
 
     const media = h.manager.add({ url: VIDEO, media: mediaRequest(), startPaused: true });
-    assert.throws(() => h.manager.changeUrl(media.id, server.url('/cl/c.bin')), /YouTube download/);
+    assert.throws(() => h.manager.changeUrl(media.id, server.url('/cl/c.bin')), /video download/);
     await h.manager.shutdown();
   });
 });

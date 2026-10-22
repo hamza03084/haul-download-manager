@@ -8,8 +8,9 @@ import { formatSpeed } from '../shared/format';
 import { DownloadManager, type Logger } from './engine/manager';
 import { openStore, type SqliteStore } from './engine/store';
 import { ToolInstaller } from './engine/tools';
-import { PROTOCOL_SCHEME, ValidationError, extractProtocolUrls, redactText, redactUrl, validateDownloadUrl } from './engine/urls';
+import { PROTOCOL_SCHEME, ValidationError, extractProtocolRequests, redactText, redactUrl, validateDownloadUrl, type BrowserAddRequest } from './engine/urls';
 import { createFileLogger } from './logger';
+import { registerHostInRegistry, writeHostManifest } from './nativeHost';
 import { ShutdownWhenDone } from './power';
 import { markFromInternet } from './zone';
 
@@ -32,6 +33,8 @@ let manager: DownloadManager | null = null;
 let tray: Tray | null = null;
 let power: ShutdownWhenDone | null = null;
 const pendingAddUrls: string[] = [];
+/** Requests from the browser that arrived before the engine was up. */
+const pendingBrowserRequests: BrowserAddRequest[] = [];
 let rendererReady = false;
 let quitting = false;
 let startHidden = process.argv.includes(HIDDEN_FLAG);
@@ -41,12 +44,14 @@ let log: Logger = { info() {}, warn() {}, error() {} };
 async function bootstrap(): Promise<void> {
   registerProtocolClient();
   app.on('second-instance', (_e, argv) => {
-    for (const url of extractProtocolUrls(argv)) deliverAddRequest(url);
-    showWindow();
+    // A haul:// link: opened by the browser, or passed on by the extension's native messaging host.
+    const requests = extractProtocolRequests(argv);
+    for (const r of requests) handleBrowserRequest(r);
+    if (requests.some((r) => !r.auto) || requests.length === 0) showWindow();
   });
-  for (const url of extractProtocolUrls(process.argv)) pendingAddUrls.push(url);
-
   await app.whenReady();
+  // (Module-level state is initialised by now: bootstrap() starts before the declarations below it.)
+  pendingBrowserRequests.push(...extractProtocolRequests(process.argv));
   Menu.setApplicationMenu(null);
 
   const userData = app.getPath('userData');
@@ -87,6 +92,8 @@ async function bootstrap(): Promise<void> {
   manager.init();
   const m = manager;
   applyLoginItem(m.getSettings());
+  for (const r of pendingBrowserRequests.splice(0)) handleBrowserRequest(r);
+  void registerNativeHost();
 
   power = new ShutdownWhenDone({
     countdownMs: Number(process.env.HAUL_SHUTDOWN_COUNTDOWN_MS) || 60_000,
@@ -140,7 +147,7 @@ async function bootstrap(): Promise<void> {
 
   createTray();
   createWindow();
-  // Get the YouTube tools in the background once the window is up, so the first YouTube link is quick.
+  // Get the video tools in the background once the window is up, so the first video link is quick.
   // Checking again every few hours keeps yt-dlp current when Haul stays open for days (the installer
   // itself looks for a newer release at most once a day).
   setTimeout(() => void m.prepareMediaTools(), 3_000).unref();
@@ -565,4 +572,49 @@ function deliverAddRequest(url: string): void {
   if (mainWindow && rendererReady) mainWindow.webContents.send('app:addRequest', url);
   else pendingAddUrls.push(url);
   log.info(`add request from browser: ${redactUrl(url)}`);
+}
+
+/**
+ * A download captured from the browser (`auto`) is added at once: the user already chose to download
+ * it there. Anything that needs a choice (a video page) or is refused goes to the add bar for review,
+ * as a right-click "Download with Haul" link always does.
+ */
+function handleBrowserRequest(r: BrowserAddRequest): void {
+  if (!r.auto || !manager) {
+    deliverAddRequest(r.url);
+    return;
+  }
+  try {
+    const added = manager.add({ url: r.url, fileName: r.fileName ?? undefined, referrer: r.referrer ?? undefined });
+    log.info(`captured from browser: ${redactUrl(r.url)} -> ${added.fileName}`);
+    if (!mainWindow?.isVisible() || mainWindow.isMinimized()) {
+      tray?.displayBalloon({ title: 'Haul is downloading', content: added.fileName, iconType: 'info', respectQuietTime: true });
+    }
+  } catch (e) {
+    log.info(`captured from browser needs review (${(e as Error).message}): ${redactUrl(r.url)}`);
+    deliverAddRequest(r.url);
+    showWindow();
+  }
+}
+
+// ------------------------------------------------------- native messaging host
+
+/**
+ * Writes the extension's native messaging host (see nativeHost.ts) and tells Chromium-based browsers
+ * where it is, per user. Done on every start, so a moved portable exe or an upgrade is picked up.
+ */
+async function registerNativeHost(): Promise<void> {
+  if (process.env.HAUL_DISABLE_PROTOCOL === '1' || process.platform !== 'win32') return;
+  try {
+    const dir = path.join(app.getPath('userData'), 'native-messaging');
+    const command = process.defaultApp
+      ? { exe: process.execPath, args: [path.resolve(process.argv[1] ?? app.getAppPath())], version: app.getVersion() }
+      : { exe: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath, version: app.getVersion() };
+    const { manifest } = writeHostManifest(dir, command);
+    const problems = await registerHostInRegistry(manifest);
+    if (problems.length) log.warn(`native messaging host: ${problems.join('; ')}`);
+    else log.info(`native messaging host registered (${manifest})`);
+  } catch (e) {
+    log.warn(`native messaging host could not be registered: ${(e as Error).message}`);
+  }
 }

@@ -76,7 +76,7 @@ describe('reading what yt-dlp reports', () => {
     ]);
     assert.throws(() => summarizeInfo({ _type: 'playlist', entries: [] }, VIDEO), (e: unknown) => e instanceof MediaError && /playlist/.test(e.message));
     assert.throws(() => summarizeInfo({ ...fixture(), is_live: true }, VIDEO), /Live streams/);
-    assert.throws(() => summarizeInfo({ id: 'x', formats: [] }, VIDEO), /no downloadable formats/);
+    assert.throws(() => summarizeInfo({ id: 'x', formats: [] }, VIDEO), /no downloadable video or audio/);
   });
 
   test('parses progress, stream, post-processing and "already downloaded" lines', () => {
@@ -118,13 +118,15 @@ describe('reading what yt-dlp reports', () => {
     const withPercent = buildDownloadArgs(spec, { url: VIDEO, home: 'C:\\dl', temp: 'C:\\dl\\50% off.mp4.haulparts', stem: '50% off', tools });
     assert.equal(withPercent[withPercent.indexOf('--print-to-file') + 2], 'C:\\dl\\50%% off.mp4.haulparts\\final-path.txt', '--print-to-file names are templates too');
     assert.equal(args[args.indexOf('--merge-output-format') + 1], 'mp4');
+    // Only containers whose codecs fit MP4 are remuxed; an Ogg or AVI file from another site is kept as it is.
+    assert.equal(args[args.indexOf('--remux-video') + 1], 'mov>mp4/m4v>mp4/3gp>mp4/ts>mp4/flv>mp4/mkv>mp4/webm>mp4');
     assert.equal(args[args.indexOf('--js-runtimes') + 1], 'deno:C:\\yt\\deno.exe');
     assert.equal(args[args.indexOf('--sub-langs') + 1], 'en');
     assert.ok(args.includes('--write-thumbnail'));
     const audio = buildDownloadArgs(validateMediaRequest(mediaRequest({ mode: 'audio', audioFormat: 'mp3', height: null, videoFormatId: null })), {
       url: VIDEO, home: 'C:\\dl', temp: 'C:\\t', stem: 's', tools,
     });
-    assert.equal(audio[audio.indexOf('-f') + 1], '140/ba');
+    assert.equal(audio[audio.indexOf('-f') + 1], '140/ba/b');
     assert.equal(audio[audio.indexOf('--audio-format') + 1], 'mp3');
     assert.ok(audio.includes('-x'));
     assert.ok(!args.includes('--limit-rate'), 'no limit by default');
@@ -208,9 +210,9 @@ describe('database upgrade', () => {
     assert.equal(rows.length, 2);
     assert.deepEqual(rows.find((r) => r.id === 'new-1')!.media, media);
     again.close();
-    assert.equal(rows.find((r) => r.id === 'old-1')!.autoCategory, false, '1.3 column defaults for old rows');
+    assert.equal(rows.find((r) => r.id === 'old-1')!.autoCategory, false, '1.3/1.4 column defaults for old rows');
     const check = new DatabaseSync(file);
-    assert.equal((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3);
+    assert.equal((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4);
     assert.ok((check.prepare('PRAGMA table_info(downloads)').all() as { name: string }[]).some((c) => c.name === 'auto_category'));
     check.close();
   });
@@ -360,7 +362,7 @@ describe('video downloads through yt-dlp (fake yt-dlp)', () => {
     const store = new SqliteStore(dbFile);
     store.upsert({
       id: 'crashed-media', kind: 'media', media: validateMediaRequest(mediaRequest({ title: 'Orphan' })), url: orphanUrl, finalUrl: null,
-      fileName: 'Orphan.mp4', directory: dir, fileNameSettled: true, state: 'downloading', totalBytes: 800_000, downloadedBytes: 50_000, autoCategory: false,
+      fileName: 'Orphan.mp4', directory: dir, fileNameSettled: true, state: 'downloading', totalBytes: 800_000, downloadedBytes: 50_000, autoCategory: false, segments: null, referrer: null,
       resumable: true, etag: null, lastModified: null, error: null, notice: null, createdAt: now, updatedAt: now, completedAt: null,
     });
     store.close();

@@ -8,8 +8,8 @@ import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { IncomingMessage } from 'node:http';
 import { createInterface } from 'node:readline';
-import type { AddDownloadRequest, DownloadRecord, DownloadState, DownloadView, MediaInfo, MediaSpec, MediaToolsStatus, Settings } from '../../shared/types';
-import { MAX_CONCURRENT_LIMIT, MAX_SPEED_LIMIT, SETTINGS_DEFAULTS } from '../../shared/types';
+import type { AddDownloadRequest, DownloadRecord, DownloadState, DownloadView, MediaInfo, MediaSpec, MediaToolsStatus, Segment, Settings } from '../../shared/types';
+import { MAX_CONCURRENT_LIMIT, MAX_CONNECTIONS, MAX_SPEED_LIMIT, SETTINGS_DEFAULTS, drmSiteOf, mediaSiteOf } from '../../shared/types';
 import { categoryOf } from '../../shared/categories';
 import {
   MEDIA_PARTS_SUFFIX,
@@ -32,17 +32,23 @@ import {
 import { ToolInstallError, type ToolInstaller } from './tools';
 import { formatBytes } from '../../shared/format';
 import {
+  HttpStatusError,
   NetworkError,
   RequestError,
   abortError,
+  header,
+  httpError,
   isAbortError,
   isStrongEtag,
   openGet,
   parseContentRange,
-  parseRetryAfter,
+  parseLength,
   parseUnsatisfiedRange,
   toNetworkError,
+  type OpenResult,
 } from './http';
+import { FileChangedError, RangesIgnoredError, runMultipart, type LiveSegment } from './multipart';
+import { MIN_SEGMENT_BYTES, contiguousPrefix, planSegments, sorted, sumDone, validSegments } from './segments';
 import {
   PARTIAL_SUFFIX,
   fileNameFromUrl,
@@ -55,7 +61,9 @@ import { fileSize, fileSizeSync, freeSpace, removeIfExists, renameWithRetry, sam
 import { SpeedMeter } from './speed';
 import { RateLimiter } from './throttle';
 import type { DownloadStore } from './store';
-import { ValidationError, isMediaPage, redactText, redactUrl, validateDownloadUrl } from './urls';
+import { ValidationError, redactText, redactUrl, refuseDrm, validateDownloadUrl } from './urls';
+
+export { HttpStatusError } from './http';
 
 export interface Logger {
   info(msg: string): void;
@@ -87,19 +95,8 @@ export interface ManagerOptions {
   mediaCommand?: string[] | null;
   /** Gets yt-dlp, FFmpeg and Deno automatically (when turned on in Settings). */
   toolInstaller?: ToolInstaller | null;
-}
-
-/** HTTP error status from the server. */
-export class HttpStatusError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly retryable: boolean,
-    readonly retryAfterMs: number | null,
-  ) {
-    super(message);
-    this.name = 'HttpStatusError';
-  }
+  /** Smallest part worth its own connection (tests use small files). */
+  minSegmentBytes?: number;
 }
 
 type StopReason = 'pause' | 'cancel' | 'shutdown';
@@ -124,9 +121,16 @@ interface ActiveTask {
   /** Media downloads: what yt-dlp is doing, and the best known total size. */
   phase: string | null;
   liveTotal: number | null;
+  /** Downloads in parts: the open file, the parts (shared with the transfer) and open connections. */
+  fh: fsp.FileHandle | null;
+  segments: LiveSegment[] | null;
+  connections: number;
+  /** Set once this server has shown it cannot serve parts: stay with one connection. */
+  singleOnly: boolean;
+  /** Explanation when the server allowed fewer connections than asked for. */
+  limitNotice: string | null;
 }
 
-const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const TERMINAL: DownloadState[] = ['completed', 'cancelled'];
 
 export class DownloadManager extends EventEmitter {
@@ -149,6 +153,7 @@ export class DownloadManager extends EventEmitter {
   private readonly userAgent?: string;
   private readonly mediaCommand: string[] | null;
   private readonly installer: ToolInstaller | null;
+  private readonly minSegmentBytes: number;
   /** One limiter for every transfer, so the speed limit in Settings is the total. */
   private readonly limiter = new RateLimiter();
 
@@ -166,6 +171,7 @@ export class DownloadManager extends EventEmitter {
     this.persistEvery = Math.max(1, Math.round((opts.persistIntervalMs ?? 2_000) / this.progressIntervalMs));
     this.maxRetryAfterMs = opts.maxRetryAfterMs ?? 60_000;
     this.getFreeSpace = opts.getFreeSpace ?? freeSpace;
+    this.minSegmentBytes = Math.max(64 * 1024, opts.minSegmentBytes ?? MIN_SEGMENT_BYTES);
     this.onFileFinalized = opts.onFileFinalized;
     this.settings = normalizeSettings({ ...opts.defaultSettings, ...this.store.loadSettings() }, opts.defaultSettings);
     this.limiter.setRate(this.settings.speedLimit);
@@ -195,8 +201,9 @@ export class DownloadManager extends EventEmitter {
       // a normal close re-queues downloads. For this state `downloadedBytes` is the last checkpoint:
       // the size known to be flushed to disk. Anything after it may be missing, or read back as zeros
       // after a power cut, so the partial file is cut back to the checkpoint before continuing.
-      // (Media downloads keep their partial streams in yt-dlp's own files, which it resumes itself.)
-      if (r.fileNameSettled && r.kind === 'http') {
+      // (Media downloads keep their partial streams in yt-dlp's own files, which it resumes itself.
+      // Downloads in parts record a checkpoint per part and overwrite anything after it, so nothing is cut.)
+      if (r.fileNameSettled && r.kind === 'http' && !r.segments) {
         const part = this.partialPath(r);
         const size = fileSizeSync(part);
         if (size !== null && size > r.downloadedBytes) {
@@ -220,7 +227,14 @@ export class DownloadManager extends EventEmitter {
     if (!TERMINAL.includes(r.state) && r.state !== 'downloading' && r.fileNameSettled && r.kind === 'http') {
       const size = fileSizeSync(this.partialPath(r));
       if (size === null && r.downloadedBytes > 0) {
-        patch({ downloadedBytes: 0, notice: 'The partial file was missing or renamed, so the download will start over.' });
+        patch({ downloadedBytes: 0, segments: null, notice: 'The partial file was missing or renamed, so the download will start over.' });
+      } else if (size !== null && r.segments) {
+        const farthest = Math.max(...r.segments.map((s) => s.start + s.done));
+        if (r.totalBytes === null || !validSegments(r.segments, r.totalBytes) || size < farthest) {
+          patch({ downloadedBytes: 0, segments: null, notice: 'The partial file no longer matches the saved progress, so the download will start over.' });
+        } else if (sumDone(r.segments) !== r.downloadedBytes) {
+          patch({ downloadedBytes: sumDone(r.segments) });
+        }
       } else if (size !== null && size !== r.downloadedBytes) {
         patch({ downloadedBytes: size });
       }
@@ -251,8 +265,23 @@ export class DownloadManager extends EventEmitter {
     if (this.shuttingDown) return;
     for (const t of this.active.values()) {
       const r = this.records.get(t.id);
+      if (!r || r.state !== 'downloading') continue;
+      if (t.fh && t.segments) {
+        const written = t.segments.map((s) => s.written);
+        try {
+          fs.fsyncSync(t.fh.fd);
+        } catch {
+          continue;
+        }
+        t.segments.forEach((s, i) => (s.done = Math.max(s.done, written[i])));
+        const segments = storedSegments(t.segments);
+        const next = { ...r, segments, downloadedBytes: sumDone(segments), updatedAt: Date.now() };
+        this.records.set(r.id, next);
+        this.store.upsert(next);
+        continue;
+      }
       const fd = t.ws ? fdOf(t.ws) : null;
-      if (!r || r.state !== 'downloading' || fd === null) continue;
+      if (fd === null) continue;
       const durable = t.wsBase + t.ws!.bytesWritten;
       try {
         fs.fsyncSync(fd);
@@ -368,6 +397,7 @@ export class DownloadManager extends EventEmitter {
   /** Asks yt-dlp which qualities a video page offers (first getting the tools if needed). */
   async probeMedia(input: unknown, signal: AbortSignal): Promise<MediaInfo> {
     const url = validateDownloadUrl(input);
+    refuseDrm(url);
     try {
       const tools = await this.readyTools(signal);
       this.log.info(`probe ${redactUrl(url)}`);
@@ -436,6 +466,7 @@ export class DownloadManager extends EventEmitter {
       etaSeconds: eta,
       fileExists: r.state === 'completed' ? fs.existsSync(path.join(r.directory, r.fileName)) : false,
       phase: t?.phase ?? null,
+      connections: t?.connections ?? 0,
     };
   }
 
@@ -444,11 +475,14 @@ export class DownloadManager extends EventEmitter {
   add(req: AddDownloadRequest): DownloadView {
     if (this.shuttingDown) throw new ValidationError('The download manager is shutting down.');
     const url = validateDownloadUrl(req?.url);
+    refuseDrm(url);
     const media = req.media ? validateMediaRequest(req.media) : null;
-    if (!media && isMediaPage(url)) {
+    const site = mediaSiteOf(url);
+    if (!media && site) {
       // Downloading the page itself would only save its HTML.
-      throw new ValidationError('This is a YouTube page, not a file. Paste it in the add bar and choose a quality.');
+      throw new ValidationError(`This is a ${site} page, not a file. Paste it in the add bar and choose a quality.`);
     }
+    const referrer = validateReferrer(req.referrer);
     let directory = typeof req.directory === 'string' && req.directory.trim() ? req.directory.trim() : this.settings.downloadDirectory;
     if (!path.isAbsolute(directory)) throw new ValidationError('Choose a full folder path for the download (for example C:\\Users\\You\\Downloads).');
     // Categories apply to the default folder only: a folder picked for this download is used as is.
@@ -496,6 +530,8 @@ export class DownloadManager extends EventEmitter {
       completedAt: null,
       media,
       autoCategory,
+      segments: null,
+      referrer,
     };
     this.records.set(id, rec);
     this.store.upsert(rec);
@@ -519,8 +555,10 @@ export class DownloadManager extends EventEmitter {
   changeUrl(id: string, input: unknown): DownloadView {
     const r = this.require(id);
     const url = validateDownloadUrl(input);
-    if (r.kind === 'media') throw new ValidationError('The link of a YouTube download cannot be changed. Remove it and add the new link.');
-    if (isMediaPage(url)) throw new ValidationError('This is a YouTube page, not a file. Paste it in the add bar and choose a quality.');
+    refuseDrm(url);
+    if (r.kind === 'media') throw new ValidationError('The link of a video download cannot be changed. Remove it and add the new link.');
+    const site = mediaSiteOf(url);
+    if (site) throw new ValidationError(`This is a ${site} page, not a file. Paste it in the add bar and choose a quality.`);
     if (r.state !== 'paused' && r.state !== 'failed' && r.state !== 'cancelled') {
       throw new ValidationError('Pause the download before changing its link.');
     }
@@ -536,6 +574,7 @@ export class DownloadManager extends EventEmitter {
       // Like retry(): the name was released on cancel, so claim it again.
       patch.fileName = uniqueFileName(r.directory, r.fileName, (p) => this.isPathTaken(p, id));
       patch.downloadedBytes = 0;
+      patch.segments = null;
     }
     this.log.info(`link changed ${id} -> ${redactUrl(url)}`);
     const next = this.patch(id, patch);
@@ -572,6 +611,7 @@ export class DownloadManager extends EventEmitter {
       // The name was released on cancel; another download or file may have claimed it since.
       patch.fileName = uniqueFileName(r.directory, r.fileName, (p) => this.isPathTaken(p, id));
       patch.downloadedBytes = 0;
+      patch.segments = null;
     }
     this.patch(id, patch);
     this.schedule();
@@ -587,7 +627,7 @@ export class DownloadManager extends EventEmitter {
     }
     if (r.state === 'completed' || r.state === 'cancelled') return;
     await this.discardPartial(r);
-    this.patch(id, { state: 'cancelled', downloadedBytes: 0, notice: null });
+    this.patch(id, { state: 'cancelled', downloadedBytes: 0, segments: null, notice: null });
   }
 
   /** Deletes what an unfinished download has stored so far. */
@@ -664,6 +704,11 @@ export class DownloadManager extends EventEmitter {
       syncing: false,
       phase: null,
       liveTotal: null,
+      fh: null,
+      segments: null,
+      connections: 0,
+      singleOnly: false,
+      limitNotice: null,
     };
     // Registered synchronously so a concurrent schedule() cannot start the same download twice.
     this.active.set(id, task);
@@ -734,12 +779,13 @@ export class DownloadManager extends EventEmitter {
     const r = this.records.get(task.id);
     if (!r) return;
     // Media progress is yt-dlp's count; its partial streams stay in the parts folder for resuming.
-    const onDisk = r.kind === 'media' ? task.bytes : r.fileNameSettled ? (await fileSize(this.partialPath(r))) ?? 0 : 0;
+    // Downloads in parts recorded each part's flushed size when the transfer ended.
+    const onDisk = r.kind === 'media' ? task.bytes : r.segments ? sumDone(r.segments) : r.fileNameSettled ? (await fileSize(this.partialPath(r))) ?? 0 : 0;
     const total = r.kind === 'media' ? task.liveTotal ?? r.totalBytes : r.totalBytes;
     switch (task.stopReason) {
       case 'cancel':
         await this.discardPartial(r);
-        this.patch(task.id, { state: 'cancelled', downloadedBytes: 0, notice: null });
+        this.patch(task.id, { state: 'cancelled', downloadedBytes: 0, segments: null, notice: null });
         this.log.info(`cancelled ${task.id}`);
         break;
       case 'shutdown':
@@ -763,12 +809,12 @@ export class DownloadManager extends EventEmitter {
   private finishFailed(task: ActiveTask, err: Error): void {
     const r = this.records.get(task.id);
     if (!r) return;
-    const onDisk = r.kind === 'media' ? task.bytes : r.fileNameSettled ? fileSizeSync(this.partialPath(r)) ?? 0 : 0;
+    const onDisk = r.kind === 'media' ? task.bytes : r.segments ? sumDone(r.segments) : r.fileNameSettled ? fileSizeSync(this.partialPath(r)) ?? 0 : 0;
     const known =
       err instanceof ValidationError || err instanceof RequestError || err instanceof NetworkError || err instanceof HttpStatusError || err instanceof MediaError;
     const message = known ? err.message : `Unexpected error: ${err.message}`;
     this.log.warn(`failed ${task.id}: ${redactText(message)}`);
-    this.patch(task.id, { state: 'failed', error: message, notice: task.restartNotice, downloadedBytes: onDisk });
+    this.patch(task.id, { state: 'failed', error: message, notice: [task.restartNotice, task.limitNotice].filter(Boolean).join(' ') || null, downloadedBytes: onDisk });
   }
 
   // --------------------------------------------------------- video pages (yt-dlp)
@@ -785,7 +831,7 @@ export class DownloadManager extends EventEmitter {
     const spec = rec.media;
     if (!spec) throw new MediaError('The details of this video download are missing. Remove it and add the link again.');
     const tools = await this.readyTools(signal, () => {
-      task.phase = 'Getting the YouTube tools ready (first time only)…';
+      task.phase = 'Getting the video tools ready (first time only)…';
     });
     const parts = this.mediaPartsDir(rec);
     try {
@@ -814,8 +860,9 @@ export class DownloadManager extends EventEmitter {
     const args = buildDownloadArgs(spec, { url: rec.url, home: rec.directory, temp: parts, stem, tools, rateLimit: this.settings.speedLimit });
     this.log.info(`yt-dlp ${task.id} ${redactUrl(rec.url)} ${spec.label}`);
 
-    // Progress across streams: a video download is a video stream, then a sound stream, then a merge.
-    const twoStreams = spec.mode === 'video';
+    // Progress across streams: a video download from YouTube is a video stream, then a sound stream,
+    // then a merge; most other sites serve one stream with the sound built in.
+    const twoStreams = spec.mode === 'video' && !!spec.audioFormatId;
     let stream = 0;
     let finished = 0;
     let current = 0;
@@ -827,7 +874,7 @@ export class DownloadManager extends EventEmitter {
       const stillToCome = twoStreams && stream <= 1 ? spec.estimateAudio ?? 0 : 0;
       task.liveTotal = Math.max(finished + (currentTotal ?? 0) + stillToCome, task.bytes) || task.liveTotal;
     };
-    task.phase = 'Asking YouTube for the video…';
+    task.phase = 'Asking the site for the video…';
 
     const child = startYtDlp(tools, args);
     recordProcess(parts, child.pid);
@@ -922,27 +969,48 @@ export class DownloadManager extends EventEmitter {
     }
 
     let existing = rec.fileNameSettled ? (await fileSize(this.partialPath(rec))) ?? 0 : 0;
+    // Parts recorded by an earlier run in several connections. They must still describe the file on disk.
+    let segments: Segment[] | null = forceFresh ? null : rec.segments;
+    if (segments) {
+      const farthest = Math.max(...segments.map((x) => x.start + x.done));
+      const usable = existing > 0 && rec.totalBytes !== null && validSegments(segments, rec.totalBytes) && existing >= farthest && !segments.every((x) => x.done >= x.end - x.start);
+      if (!usable) {
+        segments = null;
+        if (existing > 0) {
+          await removeIfExists(this.partialPath(rec));
+          existing = 0;
+        }
+        rec = this.patch(task.id, { segments: null, downloadedBytes: 0 });
+      }
+    }
     if (existing > 0 && rec.totalBytes !== null && existing > rec.totalBytes) {
       await removeIfExists(this.partialPath(rec));
       existing = 0;
+      segments = null;
     }
     if (!forceFresh && existing === 0 && rec.downloadedBytes > 0 && rec.fileNameSettled) {
       task.restartNotice = 'The partial file was deleted or moved, so the download started over.';
     }
+    // Where to continue: the first unfinished part, or (one connection) the end of the partial file.
+    const resumeSeg = segments ? sorted(segments).find((x) => x.done < x.end - x.start) ?? null : null;
+    const resumeFrom = resumeSeg ? resumeSeg.start + resumeSeg.done : existing;
+    const onDisk = segments ? sumDone(segments) : existing;
     // Resuming needs evidence the remote file is unchanged: a validator, or at minimum the known total size.
     const canResume =
-      !forceFresh && existing > 0 && rec.resumable !== false && (isStrongEtag(rec.etag) || !!rec.lastModified || rec.totalBytes !== null);
-    const headers: Record<string, string> = this.userAgent ? { 'User-Agent': this.userAgent } : {};
+      !forceFresh && onDisk > 0 && rec.resumable !== false && (isStrongEtag(rec.etag) || !!rec.lastModified || rec.totalBytes !== null);
+    const baseHeaders: Record<string, string> = this.userAgent ? { 'User-Agent': this.userAgent } : {};
+    if (rec.referrer) baseHeaders.Referer = rec.referrer;
+    const headers: Record<string, string> = { ...baseHeaders };
     if (canResume) {
-      headers.Range = `bytes=${existing}-`;
+      headers.Range = resumeSeg && rec.totalBytes !== null && resumeSeg.end < rec.totalBytes ? `bytes=${resumeFrom}-${resumeSeg.end - 1}` : `bytes=${resumeFrom}-`;
       if (isStrongEtag(rec.etag)) headers['If-Range'] = rec.etag;
       else if (rec.lastModified) headers['If-Range'] = rec.lastModified;
-    } else if (existing > 0 && !forceFresh) {
+    } else if (onDisk > 0 && !forceFresh) {
       task.restartNotice = 'This server does not support resuming, so the download restarted from the beginning.';
     }
 
-    this.log.info(`request ${task.id} ${redactUrl(rec.url)}${canResume ? ` from byte ${existing}` : ''}`);
-    let opened;
+    this.log.info(`request ${task.id} ${redactUrl(rec.url)}${canResume ? ` from byte ${resumeFrom}` : ''}`);
+    let opened: OpenResult;
     try {
       opened = await openGet(rec.url, { headers, signal, timeoutMs: this.timeoutMs });
     } catch (e) {
@@ -954,10 +1022,12 @@ export class DownloadManager extends EventEmitter {
       destroy();
       task.restartNotice = why;
       await removeIfExists(this.partialPath(rec));
-      this.patch(task.id, { downloadedBytes: 0, notice: why });
+      this.patch(task.id, { downloadedBytes: 0, segments: null, notice: why });
       task.bytes = 0;
       return this.attempt(task, true);
     };
+    const encoding = header(res, 'content-encoding');
+    const encoded = !!encoding && encoding !== 'identity';
 
     let append = false;
     let expectedTotal: number | null;
@@ -969,22 +1039,22 @@ export class DownloadManager extends EventEmitter {
       const problems: string[] = [];
       if (!cr) problems.push('missing or invalid Content-Range');
       else {
-        if (cr.start !== existing) problems.push(`server resumed at byte ${cr.start} instead of ${existing}`);
+        if (cr.start !== resumeFrom) problems.push(`server resumed at byte ${cr.start} instead of ${resumeFrom}`);
         if (cr.total === null) problems.push('unknown total size');
         else if (rec.totalBytes !== null && cr.total !== rec.totalBytes) problems.push('file size changed on the server');
       }
       if (rec.etag && etag && etag !== rec.etag) problems.push('file version (ETag) changed');
       if (rec.lastModified && lastModified && lastModified !== rec.lastModified) problems.push('modification date changed');
-      if (header(res, 'content-encoding') && header(res, 'content-encoding') !== 'identity') problems.push('compressed response');
+      if (encoded) problems.push('compressed response');
       if (problems.length) return restart(`Could not safely resume (${problems.join('; ')}), so the download restarted from the beginning.`);
       append = true;
       expectedTotal = cr!.total;
       task.pageNotice = webPageNotice(res, rec);
-      this.patch(task.id, { finalUrl, resumable: true, downloadedBytes: existing, notice: notices(task), error: null });
+      rec = this.patch(task.id, { finalUrl, resumable: true, downloadedBytes: onDisk, notice: notices(task), error: null });
     } else if (canResume && status === 416) {
       const total = parseUnsatisfiedRange(header(res, 'content-range'));
       destroy();
-      if (total !== null && total === existing && rec.totalBytes === total) {
+      if (!segments && total !== null && total === existing && rec.totalBytes === total) {
         await this.finalize(task, existing);
         return;
       }
@@ -994,8 +1064,8 @@ export class DownloadManager extends EventEmitter {
         task.restartNotice =
           'The server sent the whole file instead of the remaining part (resume unsupported or the file changed), so the download restarted from the beginning.';
       }
+      segments = null;
       const cr = status === 206 ? parseContentRange(header(res, 'content-range')) : null;
-      const encoded = !!header(res, 'content-encoding') && header(res, 'content-encoding') !== 'identity';
       const length = cr ? cr.total : parseLength(header(res, 'content-length'));
       expectedTotal = length;
       // Many servers support ranges without advertising them, so a missing Accept-Ranges header means
@@ -1004,7 +1074,7 @@ export class DownloadManager extends EventEmitter {
       const acceptRanges = header(res, 'accept-ranges') ?? '';
       let resumable: boolean | null =
         /\bbytes\b/i.test(acceptRanges) || status === 206 ? true : /\bnone\b/i.test(acceptRanges) || canResume ? false : null;
-      if (encoded || expectedTotal === null) resumable = false;
+      if (encoded || expectedTotal === null || task.singleOnly) resumable = false;
       task.pageNotice = webPageNotice(res, rec);
       const patch: Partial<DownloadRecord> = {
         finalUrl,
@@ -1013,6 +1083,7 @@ export class DownloadManager extends EventEmitter {
         lastModified: header(res, 'last-modified') ?? null,
         resumable,
         downloadedBytes: 0,
+        segments: null,
         notice: notices(task),
         error: null,
       };
@@ -1045,7 +1116,7 @@ export class DownloadManager extends EventEmitter {
 
     // Disk space check when the size is known.
     if (expectedTotal !== null) {
-      const needed = expectedTotal - (append ? existing : 0);
+      const needed = expectedTotal - (append ? onDisk : 0);
       const free = await this.getFreeSpace(rec.directory);
       if (free !== null && free < needed) {
         destroy();
@@ -1055,6 +1126,36 @@ export class DownloadManager extends EventEmitter {
       }
     }
 
+    // Several connections when the file is big enough and the server can serve parts. A server that
+    // does not advertise byte ranges may still support them, so that is tried too (and undone if not).
+    const acceptRanges = header(res, 'accept-ranges') ?? '';
+    const rangesPossible = status === 206 || /\bbytes\b/i.test(acceptRanges) || (!/\bnone\b/i.test(acceptRanges) && rec.resumable !== false);
+    const useParts =
+      expectedTotal !== null &&
+      !encoded &&
+      rangesPossible &&
+      (segments !== null || (this.settings.connections > 1 && !task.singleOnly && expectedTotal - (append ? existing : 0) >= 2 * this.minSegmentBytes));
+    if (useParts) {
+      try {
+        await this.transferParts(task, rec, opened, baseHeaders, expectedTotal!, append ? existing : 0, segments, resumeFrom);
+      } catch (e) {
+        if (e instanceof FileChangedError) return restart(`Could not safely continue (${e.message}), so the download restarted from the beginning.`);
+        if (e instanceof RangesIgnoredError) {
+          // Only the bytes complete at the front of the file are of use to one connection.
+          task.singleOnly = true;
+          const prefix = contiguousPrefix(this.require(task.id).segments ?? []);
+          await fsp.truncate(this.partialPath(rec), prefix).catch(() => {});
+          this.patch(task.id, { segments: null, downloadedBytes: prefix, resumable: false });
+          task.bytes = prefix;
+          this.log.info(`${task.id}: the server ignores Range requests; continuing with one connection`);
+          return this.attempt(task, false);
+        }
+        throw e;
+      }
+      await this.finalize(task, expectedTotal!);
+      return;
+    }
+
     const partPath = this.partialPath(rec);
     task.bytes = append ? existing : 0;
     task.meter.reset(task.bytes);
@@ -1062,6 +1163,7 @@ export class DownloadManager extends EventEmitter {
     const ws = fs.createWriteStream(partPath, { flags: append ? 'a' : 'w', flush: true });
     task.ws = ws;
     task.wsBase = task.bytes;
+    task.connections = 1;
     const limiter = this.limiter;
     const counter = new Transform({
       transform: (chunk: Buffer, _enc, cb) => {
@@ -1100,6 +1202,8 @@ export class DownloadManager extends EventEmitter {
         throw new NetworkError('The connection was interrupted before the download finished.');
       }
       throw toNetworkError(err);
+    } finally {
+      task.connections = 0;
     }
 
     if (!res.complete) throw new NetworkError('The connection was interrupted before the download finished.');
@@ -1109,6 +1213,96 @@ export class DownloadManager extends EventEmitter {
       throw new NetworkError(`Download incomplete: received ${formatBytes(size)} of ${formatBytes(expectedTotal)}.`);
     }
     await this.finalize(task, size);
+  }
+
+  /**
+   * Downloads the file in parts with several connections (see multipart.ts). `opened` is the response
+   * already received for the part starting at `resumeFrom`. Whatever happens, every part's flushed
+   * progress is recorded before this returns, so a retry or the next start continues from it.
+   */
+  private async transferParts(
+    task: ActiveTask,
+    rec: DownloadRecord,
+    opened: OpenResult,
+    headers: Record<string, string>,
+    total: number,
+    prefix: number,
+    stored: Segment[] | null,
+    resumeFrom: number,
+  ): Promise<void> {
+    const partPath = this.partialPath(rec);
+    const fresh = stored === null && prefix === 0;
+    const live: LiveSegment[] = (stored ?? planSegments(prefix, total, this.settings.connections, this.minSegmentBytes)).map((x) => ({
+      ...x,
+      written: x.done,
+      inflight: 0,
+    }));
+    const first = live.find((x) => x.start + x.written === resumeFrom && x.written < x.end - x.start);
+    if (!first) {
+      opened.destroy();
+      throw new FileChangedError('the saved parts do not match the server response');
+    }
+    let fh: fsp.FileHandle;
+    try {
+      fh = await fsp.open(partPath, fs.constants.O_RDWR | fs.constants.O_CREAT);
+      if (fresh) await fh.truncate(0);
+    } catch (e) {
+      opened.destroy();
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') {
+        throw new RequestError(`Cannot write to "${rec.directory}" (permission denied). Choose a different folder and retry.`);
+      }
+      throw new RequestError(`Cannot write the file (${code ?? (e as Error).message}).`);
+    }
+    task.fh = fh;
+    task.segments = live;
+    task.bytes = live.reduce((n, x) => n + x.written, 0);
+    task.meter.reset(task.bytes);
+    this.patch(task.id, { segments: storedSegments(live) }); // the plan survives a crash
+    this.log.info(`${task.id}: ${live.filter((x) => x.written < x.end - x.start).length} part(s) with up to ${this.settings.connections} connections`);
+    let outcome: Error | null = null;
+    try {
+      await runMultipart({
+        url: rec.url,
+        headers,
+        etag: rec.etag,
+        lastModified: rec.lastModified,
+        total,
+        segments: live,
+        maxConnections: () => this.settings.connections,
+        minSplit: Math.max(256 * 1024, this.minSegmentBytes / 2),
+        first: { opened, segment: first },
+        fh,
+        signal: task.controller.signal,
+        timeoutMs: this.timeoutMs,
+        limiter: this.limiter,
+        onProgress: (n) => {
+          task.bytes += n;
+          task.meter.sample(task.bytes);
+        },
+        onConnections: (n) => (task.connections = n),
+        onBackOff: (n) => (task.limitNotice = `The server allows fewer connections than asked for, so this download continued with ${n}.`),
+        log: (msg) => this.log.info(`${task.id}: ${msg}`),
+      });
+    } catch (e) {
+      outcome = e as Error;
+    }
+    // Keep what is safely on disk, whatever happened: flush, then record each part's progress.
+    try {
+      await fh.sync();
+      for (const x of live) x.done = Math.max(x.done, x.written);
+    } catch {
+      /* the last checkpoint stands */
+    }
+    await fh.close().catch(() => {});
+    task.fh = null;
+    task.segments = null;
+    task.connections = 0;
+    const segments = storedSegments(live);
+    if (this.records.has(task.id)) this.patch(task.id, { segments, downloadedBytes: sumDone(segments) });
+    if (outcome) throw outcome;
+    const size = (await fileSize(partPath)) ?? 0;
+    if (size !== total) throw new NetworkError(`Download incomplete: received ${formatBytes(size)} of ${formatBytes(total)}.`);
   }
 
   /** Moves the finished partial file to its final name. Only then is the download marked completed. */
@@ -1133,6 +1327,7 @@ export class DownloadManager extends EventEmitter {
       fileName: name,
       downloadedBytes: size,
       totalBytes: size,
+      segments: null,
       completedAt: Date.now(),
       error: null,
       notice: notices(task),
@@ -1204,6 +1399,29 @@ export class DownloadManager extends EventEmitter {
     const ws = t.ws;
     const fd = ws ? fdOf(ws) : null;
     const r = this.records.get(t.id);
+    if (t.fh && t.segments && r) {
+      if (t.syncing) return;
+      const fh = t.fh;
+      const segs = t.segments;
+      // Bytes handed to the OS so far, captured before the flush so they never overstate.
+      const written = segs.map((x) => x.written);
+      if (written.every((w, i) => w === segs[i].done)) return;
+      t.syncing = true;
+      fh.sync().then(
+        () => {
+          t.syncing = false;
+          const cur = this.records.get(t.id);
+          if (t.fh !== fh || !cur || cur.state !== 'downloading' || this.shuttingDown) return;
+          written.forEach((w, i) => (segs[i].done = Math.max(segs[i].done, w)));
+          const segments = storedSegments(segs);
+          const next = { ...cur, segments, downloadedBytes: sumDone(segments), updatedAt: Date.now() };
+          this.records.set(cur.id, next);
+          this.store.upsert(next);
+        },
+        () => (t.syncing = false),
+      );
+      return;
+    }
     if (r?.kind === 'media') {
       // yt-dlp owns the partial files; just keep the shown progress for the next start.
       if (r.downloadedBytes !== t.bytes || (t.liveTotal !== null && t.liveTotal !== r.totalBytes)) {
@@ -1236,7 +1454,7 @@ function fdOf(ws: fs.WriteStream): number | null {
 }
 
 function notices(task: ActiveTask): string | null {
-  return [task.restartNotice, task.pageNotice].filter(Boolean).join(' ') || null;
+  return [task.restartNotice, task.pageNotice, task.limitNotice].filter(Boolean).join(' ') || null;
 }
 
 const WEB_PAGE_EXTENSIONS = /^\.(html?|xhtml|shtml|php\d?|aspx?|jsp|cgi|cfm)$/i;
@@ -1257,29 +1475,22 @@ function webPageNotice(res: IncomingMessage, rec: DownloadRecord): string | null
   return 'This link leads to a web page, so the page itself (HTML) was saved, not a video or file shown on it. Use a direct link to the file.';
 }
 
-function header(res: IncomingMessage, name: string): string | undefined {
-  const v = res.headers[name];
-  return Array.isArray(v) ? v[0] : v;
+/** Parts as stored in the database: sorted, without the live counters. */
+function storedSegments(live: LiveSegment[]): Segment[] {
+  return sorted(live).map((x) => ({ start: x.start, end: x.end, done: x.done }));
 }
 
-function parseLength(v: string | undefined): number | null {
-  if (!v || !/^\d+$/.test(v.trim())) return null;
-  return Number(v.trim());
-}
-
-function httpError(status: number, res: IncomingMessage): HttpStatusError {
-  const retryAfter = parseRetryAfter(header(res, 'retry-after'));
-  const messages: Record<number, string> = {
-    400: 'The server rejected the request (HTTP 400).',
-    401: 'The server requires you to sign in (HTTP 401). Download the file from your browser instead.',
-    403: 'Access denied (HTTP 403). The link may have expired or require signing in.',
-    404: 'File not found on the server (HTTP 404).',
-    410: 'The file is no longer available (HTTP 410).',
-    429: 'The server is limiting requests (HTTP 429).',
-  };
-  let msg = messages[status] ?? (status >= 500 ? `Server error (HTTP ${status}).` : `Unexpected server response (HTTP ${status}).`);
-  if (retryAfter !== null && retryAfter > 60_000) msg += ` The server asked to wait ${Math.ceil(retryAfter / 60_000)} min before retrying.`;
-  return new HttpStatusError(status, msg, RETRYABLE_STATUSES.has(status), retryAfter);
+/** The page a link came from, for the Referer header; anything but an http(s) URL is dropped. */
+function validateReferrer(input: unknown): string | null {
+  if (typeof input !== 'string' || !input.trim() || input.length > 2048) return null;
+  try {
+    const u = new URL(input.trim());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    u.hash = '';
+    return u.href;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeSettings(s: Partial<Settings>, defaults: Settings): Settings {
@@ -1298,6 +1509,7 @@ function normalizeSettings(s: Partial<Settings>, defaults: Settings): Settings {
       categoriesEnabled: bool(s.categoriesEnabled, defaults.categoriesEnabled),
       startWithWindows: bool(s.startWithWindows, defaults.startWithWindows),
       closeToTray: bool(s.closeToTray, defaults.closeToTray),
+      connections: Number.isInteger(s.connections) ? Math.min(Math.max(1, s.connections!), MAX_CONNECTIONS) : defaults.connections,
     };
   }
 }
@@ -1327,6 +1539,11 @@ export function validateSettings(input: unknown): Settings {
   if (!Number.isInteger(limit) || limit < 0 || limit > MAX_SPEED_LIMIT) {
     throw new ValidationError('The speed limit must be a whole number of KB/s (0 or empty for no limit).');
   }
+  // Settings saved before 1.4 have no connection count.
+  const connections = s.connections === undefined || s.connections === null ? SETTINGS_DEFAULTS.connections : Number(s.connections);
+  if (!Number.isInteger(connections) || connections < 1 || connections > MAX_CONNECTIONS) {
+    throw new ValidationError(`Connections per download must be a whole number from 1 to ${MAX_CONNECTIONS}.`);
+  }
   return {
     downloadDirectory: path.resolve(s.downloadDirectory.trim()),
     maxConcurrent: max,
@@ -1337,6 +1554,7 @@ export function validateSettings(input: unknown): Settings {
     categoriesEnabled: optionalBool(s.categoriesEnabled, 'categories', SETTINGS_DEFAULTS.categoriesEnabled),
     startWithWindows: optionalBool(s.startWithWindows, 'start with Windows', SETTINGS_DEFAULTS.startWithWindows),
     closeToTray: optionalBool(s.closeToTray, 'keep running in the background', SETTINGS_DEFAULTS.closeToTray),
+    connections,
   };
 }
 
@@ -1364,8 +1582,9 @@ export function validateMediaRequest(input: unknown): MediaSpec {
   };
   const mode = m.mode;
   if (mode !== 'video' && mode !== 'video-only' && mode !== 'audio') fail('type');
+  // Height 0 means "best available": sites that do not report the size of their video.
   const height = m.height === null || m.height === undefined ? null : Number(m.height);
-  if (mode !== 'audio' && (height === null || !Number.isInteger(height) || height < 100 || height > 8640)) fail('quality');
+  if (mode !== 'audio' && (height === null || !Number.isInteger(height) || height < 0 || (height > 0 && height < 100) || height > 8640)) fail('quality');
   const audioFormat = m.audioFormat === 'mp3' || m.audioFormat === 'm4a' ? m.audioFormat : null;
   if (mode === 'audio' && !audioFormat) fail('audio format');
   const optId = (v: unknown, what: string) => {
@@ -1389,7 +1608,7 @@ export function validateMediaRequest(input: unknown): MediaSpec {
     audioFormatId: mode === 'video-only' ? null : optId(m.audioFormatId, 'audio format'),
     videoId: text(m.videoId, 64),
     title,
-    label: text(m.label, 120) || (mode === 'audio' ? `Audio (${audioFormat?.toUpperCase()})` : `${height}p`),
+    label: text(m.label, 120) || (mode === 'audio' ? `Audio (${audioFormat?.toUpperCase()})` : height ? `${height}p` : 'Best available'),
     estimateVideo: mode === 'audio' ? null : estimate(m.estimateVideo),
     estimateAudio: mode === 'video-only' ? null : estimate(m.estimateAudio),
   };

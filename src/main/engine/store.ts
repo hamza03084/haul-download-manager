@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import type { DownloadRecord, DownloadState, MediaSpec, Settings } from '../../shared/types';
+import type { DownloadRecord, DownloadState, MediaSpec, Segment, Settings } from '../../shared/types';
 
 export interface DownloadStore {
   loadAll(): DownloadRecord[];
@@ -34,16 +34,19 @@ export class SqliteStore implements DownloadStore {
     }
     this.upsertStmt = this.db.prepare(`
       INSERT INTO downloads (id, kind, url, final_url, file_name, directory, file_name_settled, state, total_bytes,
-        downloaded_bytes, resumable, etag, last_modified, error, notice, created_at, updated_at, completed_at, media, auto_category)
+        downloaded_bytes, resumable, etag, last_modified, error, notice, created_at, updated_at, completed_at, media, auto_category,
+        segments, referrer)
       VALUES (:id, :kind, :url, :finalUrl, :fileName, :directory, :fileNameSettled, :state, :totalBytes,
-        :downloadedBytes, :resumable, :etag, :lastModified, :error, :notice, :createdAt, :updatedAt, :completedAt, :media, :autoCategory)
+        :downloadedBytes, :resumable, :etag, :lastModified, :error, :notice, :createdAt, :updatedAt, :completedAt, :media, :autoCategory,
+        :segments, :referrer)
       ON CONFLICT(id) DO UPDATE SET
         kind = excluded.kind, url = excluded.url, final_url = excluded.final_url, file_name = excluded.file_name,
         directory = excluded.directory, file_name_settled = excluded.file_name_settled, state = excluded.state,
         total_bytes = excluded.total_bytes, downloaded_bytes = excluded.downloaded_bytes,
         resumable = excluded.resumable, etag = excluded.etag, last_modified = excluded.last_modified,
         error = excluded.error, notice = excluded.notice, updated_at = excluded.updated_at,
-        completed_at = excluded.completed_at, media = excluded.media, auto_category = excluded.auto_category`);
+        completed_at = excluded.completed_at, media = excluded.media, auto_category = excluded.auto_category,
+        segments = excluded.segments, referrer = excluded.referrer`);
   }
 
   /**
@@ -68,6 +71,8 @@ export class SqliteStore implements DownloadStore {
     step(2, `ALTER TABLE downloads ADD COLUMN kind TEXT NOT NULL DEFAULT 'http'; ALTER TABLE downloads ADD COLUMN media TEXT`);
     // 1.3: downloads still waiting to be sorted into a category subfolder once their name is known.
     step(3, `ALTER TABLE downloads ADD COLUMN auto_category INTEGER NOT NULL DEFAULT 0`);
+    // 1.4: parts of a file fetched by several connections, and the page a link came from.
+    step(4, `ALTER TABLE downloads ADD COLUMN segments TEXT; ALTER TABLE downloads ADD COLUMN referrer TEXT`);
   }
 
   loadAll(): DownloadRecord[] {
@@ -98,6 +103,8 @@ export class SqliteStore implements DownloadStore {
       completedAt: r.completedAt,
       media: r.media ? JSON.stringify(r.media) : null,
       autoCategory: r.autoCategory ? 1 : 0,
+      segments: r.segments ? JSON.stringify(r.segments) : null,
+      referrer: r.referrer,
     });
   }
 
@@ -238,5 +245,27 @@ function rowToRecord(row: Record<string, unknown>): DownloadRecord {
     updatedAt: Number(row.updated_at),
     completedAt: num(row.completed_at),
     autoCategory: Number(row.auto_category ?? 0) === 1,
+    segments: parseSegments(row.segments),
+    referrer: str(row.referrer),
   };
+}
+
+/** Segments as stored, or null when missing or unreadable (the download then starts over). */
+function parseSegments(raw: unknown): Segment[] | null {
+  if (typeof raw !== 'string') return null;
+  try {
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list) || list.length === 0) return null;
+    const out: Segment[] = [];
+    for (const s of list) {
+      const start = Number(s?.start);
+      const end = Number(s?.end);
+      const done = Number(s?.done);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || !Number.isInteger(done) || start < 0 || end < start || done < 0 || done > end - start) return null;
+      out.push({ start, end, done });
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }

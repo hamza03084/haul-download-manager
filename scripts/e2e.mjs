@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { expectedMedia } = createRequire(import.meta.url)(path.join(root, 'dist', 'tests', 'helpers', 'fakeMedia.js'));
+const { EXTENSION_ORIGIN, encodeMessage, readMessage, writeHostManifest } = createRequire(import.meta.url)(path.join(root, 'dist', 'src', 'main', 'nativeHost.js'));
 const exeIdx = process.argv.indexOf('--exe');
 const exe = exeIdx > 0 ? path.resolve(process.argv[exeIdx + 1]) : null;
 const outDir = path.join(root, 'e2e-output');
@@ -42,6 +43,12 @@ const files = {
   '/files/renewed.bin': { body: expiringBody, delay: 0 },
   '/files/shutdown-test.bin': { body: randomBytes(6_000_000), delay: 40 },
   '/files/background.bin': { body: randomBytes(3_000_000), delay: 25 },
+  // Downloaded in parts: slow per connection, so four connections are clearly faster than one.
+  '/files/parts.bin': { body: randomBytes(8_000_000), delay: 30 },
+  '/files/captured.bin': { body: randomBytes(400_000), delay: 0 },
+  '/files/captured-later.bin': { body: randomBytes(400_000), delay: 0 },
+  // A link that is really a web page (as a "download" page or an unknown video site would be).
+  '/files/page?site=generic': { body: Buffer.from('<!doctype html><html><body><video src="clip.mp4"></video></body></html>'), delay: 0, html: true },
 };
 const server = http.createServer(async (req, res) => {
   const f = files[req.url];
@@ -49,16 +56,22 @@ const server = http.createServer(async (req, res) => {
   if (f.expired) return res.writeHead(403, { 'Content-Type': 'text/plain' }).end('link expired');
   const etag = `"${createHash('sha1').update(f.body).digest('hex').slice(0, 12)}"`;
   let start = 0;
-  const m = /^bytes=(\d+)-$/.exec(req.headers.range ?? '');
-  const headers = { 'Accept-Ranges': 'bytes', ETag: etag, 'Content-Type': 'application/octet-stream' };
+  let end = f.body.length;
+  const m = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range ?? '');
+  const headers = { 'Accept-Ranges': 'bytes', ETag: etag, 'Content-Type': f.html ? 'text/html' : 'application/octet-stream' };
+  f.requests = (f.requests ?? 0) + 1;
+  f.inFlight = (f.inFlight ?? 0) + 1;
+  f.peak = Math.max(f.peak ?? 0, f.inFlight);
+  res.once('close', () => f.inFlight--);
   if (m && (!req.headers['if-range'] || req.headers['if-range'] === etag)) {
     start = Number(m[1]);
-    res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${f.body.length - 1}/${f.body.length}`, 'Content-Length': f.body.length - start });
+    if (m[2]) end = Math.min(f.body.length, Number(m[2]) + 1);
+    res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end - 1}/${f.body.length}`, 'Content-Length': end - start });
   } else {
     res.writeHead(200, { ...headers, 'Content-Length': f.body.length });
   }
-  for (let off = start; off < f.body.length && !res.destroyed; off += 64 * 1024) {
-    if (!res.write(f.body.subarray(off, off + 64 * 1024))) await new Promise((r) => res.once('drain', r));
+  for (let off = start; off < end && !res.destroyed; off += 64 * 1024) {
+    if (!res.write(f.body.subarray(off, Math.min(end, off + 64 * 1024)))) await new Promise((r) => res.once('drain', r));
     if (f.delay) await new Promise((r) => setTimeout(r, f.delay));
   }
   res.end();
@@ -180,6 +193,34 @@ async function launch(extraArgs = []) {
   return { app, win, kill, exited };
 }
 const card = (win, name) => win.locator('article.card', { has: win.locator('.card-name', { hasText: name }) });
+
+/**
+ * Talks to the native messaging host the way a browser does: starts the host .cmd (written by
+ * writeHostManifest, as Haul writes it, but pointing at the build under test and the test profile),
+ * sends one message over its stdin and reads the reply from its stdout.
+ */
+let hostFiles = null;
+async function askNativeHost(message, env, origin = EXTENSION_ORIGIN) {
+  if (!hostFiles) {
+    const hostEnv = { HAUL_USER_DATA_DIR: env.HAUL_USER_DATA_DIR, HAUL_DOWNLOAD_DIR: downloads, HAUL_DISABLE_PROTOCOL: '1', HAUL_NO_TOOL_DOWNLOADS: '1', HAUL_YTDLP_COMMAND: env.HAUL_YTDLP_COMMAND ?? '' };
+    hostFiles = exe
+      ? writeHostManifest(path.join(work, 'native-messaging'), { exe, version: 'test', env: hostEnv })
+      : writeHostManifest(path.join(work, 'native-messaging'), { exe: path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe'), args: [root], version: 'test', env: hostEnv });
+  }
+  const proc = spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/c', hostFiles.path, origin], { env, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+  const reply = readMessage(proc.stdout, 60_000);
+  proc.stdin.write(encodeMessage(message));
+  const result = await reply.catch((e) => ({ ok: false, error: e.message }));
+  const exited = await Promise.race([new Promise((r) => proc.once('exit', r)), sleep(15_000).then(() => 'still running')]);
+  return { reply: result, exited };
+}
+
+/** PID of a Haul started by the native host (recognisable by the haul:// link in its command line), or null. */
+function findHaulByCommandLine(marker) {
+  const out = execFileSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${marker}*' -and $_.CommandLine -notlike '*powershell*' } | Select-Object -ExpandProperty ProcessId`], { encoding: 'utf8' });
+  const pid = Number(out.trim().split(/\s+/)[0]);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
 async function addUrl(win, url) {
   await win.fill('.addbar-input', url);
   await win.press('.addbar-input', 'Enter');
@@ -205,9 +246,18 @@ async function saveSettings(win) {
   await win.locator('.sheet').waitFor({ state: 'detached' });
 }
 
+/** Ends Haul processes left over from earlier runs of this script (they would count as "running" Haul). */
+function killLeftovers() {
+  try {
+    const marker = exe ? exe.replace(/'/g, "''") : root.replace(/'/g, "''");
+    execFileSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${marker}*' -and ($_.Name -eq 'electron.exe' -or $_.Name -like 'Haul*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`], { stdio: 'ignore' });
+  } catch {}
+}
+
 let app;
 let lastWin = null;
 let registeredStartup = false;
+killLeftovers();
 try {
   // ------------------------------------------------------------ first run
   let s = await launch();
@@ -289,13 +339,15 @@ try {
 
   // Settings
   await openSettings(win);
-  await win.getByRole('button', { name: 'Fewer' }).click();
+  await win.getByRole('button', { name: 'Fewer', exact: true }).click();
   check('settings panel shows the app version', /Haul \d+\.\d+\.\d+/.test(await win.locator('.version').textContent()));
   check('settings offer start with Windows and keep-running-in-background', (await win.getByLabel('Start Haul when I sign in to Windows').count()) === 1 && (await win.getByLabel('Keep running in the background when the window is closed').count()) === 1);
+  check('settings offer connections per download (default 4)', (await win.locator('[aria-label="Connections per download"] .stepper-value').textContent()) === '4');
   await win.screenshot({ path: path.join(outDir, '04-settings.png') });
   await saveSettings(win);
   await win.locator('.statusbar', { hasText: '2 at a time' }).waitFor();
   check('settings save (3 -> 2 simultaneous downloads)', true);
+  check('status bar shows the connections per download', (await win.locator('.statusbar').textContent()).includes('4 connections'));
 
   // Expand details
   await card(win, 'quick.zip').locator('.card-main').click();
@@ -337,6 +389,25 @@ try {
   await saveSettings(win);
   check('speed limit can be turned off again', !(await win.locator('.statusbar').textContent()).includes('limit'));
 
+  // ---------------------------------------------------------- several connections per download
+  await addUrl(win, `${base}/files/parts.bin`);
+  await card(win, 'parts.bin').locator('.meta-text', { hasText: '4 connections' }).waitFor({ timeout: 20_000 });
+  check('a big download runs over 4 connections and the card says so', true);
+  await waitBytes(win, 'parts.bin', 20);
+  await win.screenshot({ path: path.join(outDir, '13-connections.png') });
+  await card(win, 'parts.bin').getByRole('button', { name: 'Pause' }).click();
+  await waitPill(win, 'parts.bin', 'Paused');
+  const partsPartial = path.join(downloads, 'parts.bin.haulpart');
+  check('pausing a download in parts keeps its partial file', fs.existsSync(partsPartial) && fs.statSync(partsPartial).size > 0);
+  await card(win, 'parts.bin').locator('.card-main').click();
+  check('card details show the parts', /Downloaded in \d+ parts/.test(await card(win, 'parts.bin').locator('.card-details').textContent()));
+  await card(win, 'parts.bin').locator('.card-main').click();
+  const partsRequestsBefore = files['/files/parts.bin'].requests;
+  await card(win, 'parts.bin').getByRole('button', { name: 'Resume' }).click();
+  await waitPill(win, 'parts.bin', 'Done', 120_000);
+  check('resumed download in parts is byte-identical', sameBytes(path.join(downloads, 'parts.bin'), files['/files/parts.bin'].body));
+  check('...several responses were in flight at once and every part was asked for again', files['/files/parts.bin'].peak >= 3 && files['/files/parts.bin'].requests - partsRequestsBefore >= 2, `peak ${files['/files/parts.bin'].peak} in flight, ${files['/files/parts.bin'].requests - partsRequestsBefore} requests on resume`);
+
   // ---------------------------------------------------------- change link (expired link)
   await addUrl(win, `${base}/files/expiring.bin`);
   await waitBytes(win, 'expiring.bin', 5);
@@ -359,7 +430,7 @@ try {
   await waitPill(win, 'expiring.bin', 'Done', 60_000);
   check('after changing the link, the download finished and is byte-identical', sameBytes(path.join(downloads, 'expiring.bin'), expiringBody));
   const resumedFrom = /renewed\.bin from byte (\d+)/.exec(readLog());
-  check('...and it continued from the partial file instead of starting over', !!resumedFrom && Number(resumedFrom[1]) === keptBytes, resumedFrom ? `from byte ${resumedFrom[1]} of ${keptBytes}` : 'no Range request logged');
+  check('...and it continued from the partial data instead of starting over', !!resumedFrom && Number(resumedFrom[1]) > 0 && Number(resumedFrom[1]) <= keptBytes, resumedFrom ? `from byte ${resumedFrom[1]} (partial file ${keptBytes} bytes)` : 'no Range request logged');
 
   // ---------------------------------------------------------- shut down when done
   await addUrl(win, `${base}/files/shutdown-test.bin`);
@@ -488,6 +559,49 @@ try {
   await waitPill(win, `${TITLE}.mp3`, 'Done', 60_000);
   check('audio-only MP3 + thumbnail saved into Music', sameBytes(path.join(downloads, 'Music', `${TITLE}.mp3`), expectedMedia([{ id: '140', size: 200_000 }])) && fs.existsSync(path.join(downloads, 'Music', `${TITLE}.jpg`)));
 
+  // ------------------------------------------------- other video sites: Vimeo (fake yt-dlp)
+  const VIMEO_TITLE = 'The New Vimeo Player (You Know, For Videos)';
+  await addUrl(win, 'https://vimeo.com/76979871?site=vimeo&vsize=300000&delay=30');
+  await win.locator('.picker-row').first().waitFor({ timeout: 30_000 });
+  check('a Vimeo link opens the picker, named after the site', (await win.locator('.picker-kicker').textContent()) === 'Vimeo');
+  const vimeoRows = await win.locator('.picker-row .picker-q').allTextContents();
+  check('...listing the sizes Vimeo offers (sound built in)', vimeoRows.join(',') === '1080p (HD),720p (HD),540p,360p,240p' && (await win.locator('.picker-row.is-on .picker-codec').textContent()).includes('+ sound'), vimeoRows.join(', '));
+  check('..."Video only" is unavailable on a site without separate picture streams', await win.getByRole('tab', { name: 'Video only' }).isDisabled());
+  await win.screenshot({ path: path.join(outDir, '14-vimeo-picker.png') });
+  await win.locator('.picker .btn-accent').click();
+  await waitPill(win, `${VIMEO_TITLE}.mp4`, 'Done', 60_000);
+  check('the Vimeo video is downloaded as one stream and sorted into Video', sameBytes(path.join(downloads, 'Video', `${VIMEO_TITLE}.mp4`), expectedMedia([{ id: 'http-1080p', size: 300_000 }])));
+
+  // ------------------------------------------------- a page that is not on the list: "Try as video"
+  await addUrl(win, `${base}/files/page?site=generic`);
+  await waitPill(win, 'page', 'Done');
+  check('a link to a web page is flagged as such', (await card(win, 'page').locator('.card-notice').textContent()).includes('web page'));
+  await card(win, 'page').getByRole('button', { name: 'Try as video page' }).click();
+  await win.locator('.picker-row').first().waitFor({ timeout: 30_000 });
+  check('"Try as video" asks yt-dlp and offers what it found', (await win.locator('.picker-row .picker-q').first().textContent()) === 'Best available');
+  await win.locator('.picker .btn-accent').click();
+  await waitPill(win, 'clip.mp4', 'Done', 60_000);
+  check('...and the video from that page is downloaded', sameBytes(path.join(downloads, 'Video', 'clip.mp4'), expectedMedia([{ id: '0', size: 600_000 }])));
+
+  // ------------------------------------------------- browser extension: native messaging host
+  // What the browser does when the extension hands over a download: start Haul's exe with the
+  // extension's origin and talk over stdin/stdout. Haul is running, so the request goes to it.
+  const hostEnv = { ...process.env, HAUL_USER_DATA_DIR: profile, HAUL_DISABLE_PROTOCOL: '1', HAUL_NO_TOOL_DOWNLOADS: '1', HAUL_YTDLP_COMMAND: JSON.stringify([process.execPath, path.join(root, 'dist', 'tests', 'fixtures', 'fakeYtDlp.js')]) };
+  delete hostEnv.ELECTRON_RUN_AS_NODE;
+  const ping = await askNativeHost({ type: 'ping' }, hostEnv);
+  check('the native messaging host answers a ping with the version', ping.reply.ok === true && ping.reply.version === 'test' && ping.exited !== 'still running', JSON.stringify(ping.reply));
+  const captured = await askNativeHost({ type: 'add', url: `${base}/files/captured.bin`, fileName: 'from-browser.bin', referrer: `${base}/some/page`, auto: true }, hostEnv);
+  check('a captured browser download is accepted and delivered to the running Haul', captured.reply.ok === true && captured.reply.delivered === 'running', JSON.stringify(captured.reply));
+  await waitPill(win, 'from-browser.bin', 'Done', 30_000);
+  check('...it was added at once under the browser\'s file name and finished', sameBytes(path.join(downloads, 'from-browser.bin'), files['/files/captured.bin'].body));
+  await card(win, 'from-browser.bin').locator('.card-main').click();
+  check('...and the card shows the page it came from', (await card(win, 'from-browser.bin').locator('.card-details').textContent()).includes(`${base}/some/page`));
+  await card(win, 'from-browser.bin').locator('.card-main').click();
+  const refused = await askNativeHost({ type: 'add', url: 'ftp://example.com/x' }, hostEnv);
+  check('the host refuses anything but http(s) links', refused.reply.ok === false, JSON.stringify(refused.reply));
+  const stranger = (await askNativeHost({ type: 'ping' }, hostEnv, 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/')).reply;
+  check('another extension is refused by the host', stranger.ok === false && /not allowed/.test(stranger.error ?? ''), JSON.stringify(stranger));
+
   // ------------------------------------------- Windows shutting down mid-download
   // Needs access to the main process, so only in development mode. Windows sends 'session-end'
   // and may terminate the app right after it returns: simulate exactly that.
@@ -495,9 +609,12 @@ try {
     await addUrl(win, `${base}/files/windows-shutdown.bin`);
     await waitBytes(win, 'windows-shutdown.bin', 20);
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].emit('session-end', {}));
+    // The checkpoint is synchronous; only the log line about it is written asynchronously, so give
+    // that a moment before the process is terminated.
+    const noted = await until(() => readLog().includes('Windows is ending the session'), 3_000, 50);
     await s.kill();
     app = null;
-    check('Windows shutdown handler saved progress', readLog().includes('Windows is ending the session'));
+    check('Windows shutdown handler saved progress', noted);
     s = await launch();
     app = s.app;
     win = s.win;
@@ -509,6 +626,27 @@ try {
   }
   await app.close();
   app = null;
+
+  // ------------------------------------------------- native messaging host with no Haul running
+  // The browser captures a download while Haul is closed: the host starts Haul with it.
+  {
+    const hostEnv = { ...process.env, HAUL_USER_DATA_DIR: profile, HAUL_DISABLE_PROTOCOL: '1', HAUL_NO_TOOL_DOWNLOADS: '1', HAUL_DOWNLOAD_DIR: downloads };
+    delete hostEnv.ELECTRON_RUN_AS_NODE;
+    await sleep(2_000); // the closed Haul's lock must be gone before the host looks
+    const started = await askNativeHost({ type: 'add', url: `${base}/files/captured-later.bin`, fileName: 'captured-later.bin', auto: true }, hostEnv);
+    try {
+      check('with Haul closed, the host starts Haul with the captured download', started.reply.ok === true && started.reply.delivered === 'started', JSON.stringify(started.reply));
+      const finished = await until(() => sameBytes(path.join(downloads, 'captured-later.bin'), files['/files/captured-later.bin'].body), 60_000, 250);
+      check('...which downloads it', finished);
+      const pid = findHaulByCommandLine('captured-later.bin');
+      check('...in a Haul process started with the request on its command line', pid !== null, `pid ${pid}`);
+    } finally {
+      // The Haul the host started is not under Playwright's control: end it whatever happened.
+      const pid = findHaulByCommandLine('captured-later.bin');
+      if (pid) killTree(pid);
+      await sleep(1_500);
+    }
+  }
 
   // ------------------------------------------------------------ started hidden (as at Windows sign-in)
   // The user's own Haul may be open too, so only the change in visible windows counts.

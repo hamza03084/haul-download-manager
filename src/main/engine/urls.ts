@@ -1,4 +1,4 @@
-import { MEDIA_PAGE_HOSTS } from '../../shared/types';
+import { drmSiteOf, mediaSiteOf } from '../../shared/types';
 
 export const MAX_URL_LENGTH = 8192;
 
@@ -29,11 +29,17 @@ export function validateDownloadUrl(input: unknown): URL {
 }
 
 /**
- * YouTube links are web pages with a player, not video files. Downloading one as a plain file would
- * save the page's HTML, so they must go through the quality picker (yt-dlp) instead.
+ * Links to video sites are web pages with a player, not video files. Downloading one as a plain file
+ * would save the page's HTML, so they must go through the quality picker (yt-dlp) instead.
  */
 export function isMediaPage(url: URL): boolean {
-  return MEDIA_PAGE_HOSTS.test(url.hostname);
+  return mediaSiteOf(url) !== null;
+}
+
+/** Streaming services with copy protection: refused up front, with the reason. */
+export function refuseDrm(url: URL): void {
+  const site = drmSiteOf(url);
+  if (site) throw new ValidationError(`${site} protects its videos with DRM. Getting around copy protection is not allowed, so Haul cannot download from it.`);
 }
 
 /**
@@ -70,21 +76,54 @@ function truncate(s: string, n: number): string {
 
 export const PROTOCOL_SCHEME = 'haul';
 
+/** What the browser extension asks for: a link, and for captured downloads the browser's name for it and its page. */
+export interface BrowserAddRequest {
+  url: string;
+  fileName: string | null;
+  referrer: string | null;
+  /** True when the browser's own download was intercepted: add it at once instead of asking first. */
+  auto: boolean;
+}
+
 /**
- * Finds `haul://add?url=<encoded http(s) URL>` arguments (from the browser extension) and returns
- * the validated download URLs. Anything malformed or non-http(s) is ignored.
+ * Finds `haul://add?url=<encoded http(s) URL>[&name=…&referrer=…&auto=1]` arguments (from the browser
+ * extension) and returns the validated requests. Anything malformed or non-http(s) is ignored.
  */
-export function extractProtocolUrls(argv: string[]): string[] {
-  const out: string[] = [];
+export function extractProtocolRequests(argv: string[]): BrowserAddRequest[] {
+  const out: BrowserAddRequest[] = [];
   for (const arg of argv) {
     if (typeof arg !== 'string' || !arg.toLowerCase().startsWith(`${PROTOCOL_SCHEME}://`)) continue;
     try {
       const u = new URL(arg);
       const target = u.searchParams.get('url');
-      if (u.hostname === 'add' && target) out.push(validateDownloadUrl(target).href);
+      if (u.hostname !== 'add' || !target) continue;
+      const name = (u.searchParams.get('name') ?? '').trim().slice(0, 255);
+      let referrer: string | null = null;
+      try {
+        const r = new URL(u.searchParams.get('referrer') ?? '');
+        if (r.protocol === 'http:' || r.protocol === 'https:') referrer = r.href;
+      } catch {
+        /* no referrer */
+      }
+      out.push({ url: validateDownloadUrl(target).href, fileName: name || null, referrer, auto: u.searchParams.get('auto') === '1' });
     } catch {
       /* ignore malformed requests */
     }
   }
   return out;
+}
+
+/** The download URLs of `haul://add` arguments (the context-menu form of the request). */
+export function extractProtocolUrls(argv: string[]): string[] {
+  return extractProtocolRequests(argv).map((r) => r.url);
+}
+
+/** The `haul://add` form of a request, as the native messaging host hands it to a running Haul. */
+export function buildProtocolUrl(req: BrowserAddRequest): string {
+  const u = new URL(`${PROTOCOL_SCHEME}://add`);
+  u.searchParams.set('url', req.url);
+  if (req.fileName) u.searchParams.set('name', req.fileName);
+  if (req.referrer) u.searchParams.set('referrer', req.referrer);
+  if (req.auto) u.searchParams.set('auto', '1');
+  return u.href;
 }

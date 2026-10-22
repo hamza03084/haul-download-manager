@@ -2,6 +2,26 @@
 
 All notable changes to Haul Download Manager are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-10-23
+
+### Added
+- **Several connections per download** (Settings → Connections per download, 1–16, default 4). Files of 2 MB or more are fetched in parts at the same time, each part over its own connection and written at its place in the single partial file. When a part finishes, the biggest part still running is split so the free connection helps with it. Every part is checkpointed on its own (flushed every 2 seconds, and when Windows shuts down), so pause, resume, closing Haul, crashes and power cuts keep each part's progress. Every part's reply is checked (byte position, size, ETag/Last-Modified) before it is written. Servers that refuse extra connections (HTTP 429/503/403) get fewer, with a note on the download; a server that answers a part request with the whole file gets one connection. Downloads from older versions continue in parts after a pause and resume. The card shows the open connections; the status bar shows the setting.
+- **Video sites beyond YouTube.** Links to Vimeo, Dailymotion, Twitch, TikTok, X (Twitter), Facebook, Instagram, Reddit, Streamable, Bilibili, Rumble, Odysee, SoundCloud, Bandcamp, TED, VK, OK.ru and the Internet Archive open the quality picker like YouTube links. Sites that serve picture and sound in one stream (most of them) are handled: one stream is downloaded, nothing is joined, and "Video only" is offered only where the site has a separate picture stream. HLS and DASH streams are accepted (plain files preferred). Pages that do not say how big their video is get a "Best available" choice. The picker names the site.
+- **Try as video** on a download that turned out to be a web page: asks yt-dlp whether that page has a video (it knows over a thousand sites) and opens the picker.
+- **DRM services are refused** with the reason (Netflix, Disney+, Prime Video, Max, Hulu, Spotify, Peacock, Paramount+, Apple TV, Crunchyroll).
+- **Browser extension 2.0: takes over downloads.** When a download starts in Chrome or Edge, the extension pauses it, hands the link, the browser's file name and the page it came from to Haul through native messaging, and removes it from the browser. Haul adds it at once (and notifies from the notification area when its window is hidden), starting by itself if it is not running. If Haul cannot be reached, the browser's download continues. The extension's popup has the file types to take over (defaults: archives, programs, video, music, documents, images, plus any file of 20 MB or more), an "every download" switch and an off switch; it also shows whether Haul is reachable. The right-click menu entry stays. Haul writes the native messaging host (a small PowerShell script, since an Electron program cannot be a host on Windows: Electron prints a newline to stdout at startup, which breaks the browser's message framing) and registers it for Chrome, Edge, Chromium and Brave on every start (per user); the uninstaller removes the entries. The page a captured link came from is sent as the `Referer` header, as the browser would have, which makes many file hosts accept the download.
+
+### Changed
+- The database schema is now version 4 (two new columns: the parts of a download and its referrer). Upgrading from 1.0–1.3 is automatic and keeps your history; older versions can still open the database, but finish or remove downloads in progress first: they do not understand parts.
+- Settings and the picker say "video sites" instead of "YouTube" where it applies to all of them; yt-dlp's errors for unsupported pages, unavailable formats and sites that need an account are explained.
+
+### Fixed
+- A video from a site that serves picture and sound in one stream showed "Downloading video (1 of 2)" and an estimate that counted a sound stream that does not exist.
+
+### Tests
+- Full results, including five bugs found and fixed before release, are in [docs/test-report-1.4.0.md](docs/test-report-1.4.0.md).
+- 35 new engine tests: planning and validating parts; several connections in flight; small files, no-range servers and the 1-connection setting staying single; ranges tried on servers that do not advertise them and the fallback when they ignore them; pause and resume of every part with If-Range; parts surviving a close and a simulated power cut (zeros past each checkpoint); checkpoints never ahead of the disk; `checkpointNow`; an older single-connection download continuing in parts; HTTP 429 back-off; a dropped part reconnecting; a changed file restarting; cancel and change link with parts; the shared speed limit; a damaged parts record; the Referer header; the crash test with 1 and 4 connections; the chaos test now alternates 1 and 2–4 connections; site detection and DRM refusal; Vimeo-style and generic-page probes; "best available"; the native messaging host itself (run for real through its .cmd, with Node standing in for Haul: ping, a captured download arriving as a haul:// link, the context-menu form, refused links and a refused extension), its framing, manifest and registry entries (under a test key). The end-to-end UI test covers the connections setting and card, a Vimeo link through the picker, "Try as video", and the native messaging host receiving a download from a (simulated) browser.
+
 ## [1.3.0] - 2026-10-23
 
 ### Added
@@ -62,6 +82,7 @@ All notable changes to Haul Download Manager are listed here. Versions follow [S
 
 First release: HTTP/HTTPS downloads with a queue, pause and resume (validated byte ranges), automatic retries, crash recovery, persistent history and settings (SQLite), Mark of the Web on finished files, an optional Chrome/Edge extension, and a per-user Windows installer plus a portable build.
 
+[1.4.0]: https://github.com/hamza03084/haul-download-manager/releases/tag/v1.4.0
 [1.3.0]: https://github.com/hamza03084/haul-download-manager/releases/tag/v1.3.0
 [1.2.0]: https://github.com/hamza03084/haul-download-manager/releases/tag/v1.2.0
 [1.1.0]: #110---2026-10-22

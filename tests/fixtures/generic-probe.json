@@ -1,0 +1,19 @@
+{
+ "id": "clip",
+ "title": "clip",
+ "extractor": "generic",
+ "extractor_key": "Generic",
+ "url": "https://example.test/media/clip.mp4",
+ "ext": "mp4",
+ "protocol": "https",
+ "duration": null,
+ "formats": [
+  {
+   "format_id": "0",
+   "url": "https://example.test/media/clip.mp4",
+   "ext": "mp4",
+   "protocol": "https",
+   "filesize": 12345678
+  }
+ ]
+}
