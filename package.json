@@ -1,0 +1,109 @@
+{
+  "name": "haul-download-manager",
+  "productName": "Haul Download Manager",
+  "version": "1.2.0",
+  "description": "A standalone Windows download manager with pause/resume, queueing and persistent history.",
+  "author": "Haul Download Manager contributors",
+  "license": "MIT",
+  "homepage": "https://github.com/hamza03084/haul-download-manager",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hamza03084/haul-download-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hamza03084/haul-download-manager/issues"
+  },
+  "private": true,
+  "main": "dist/src/main/main.js",
+  "scripts": {
+    "build:main": "node scripts/clean.mjs && tsc -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "build": "npm run licenses && npm run build:main && npm run build:renderer",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "start": "npm run build && electron .",
+    "test": "npm run build:main && node --test --test-concurrency=1 \"dist/tests/**/*.test.js\"",
+    "e2e": "node scripts/e2e.mjs",
+    "dist": "npm run build && electron-builder --win --publish never",
+    "dist:dir": "npm run build && electron-builder --win dir --publish never",
+    "licenses": "node scripts/licenses.mjs",
+    "icon": "node scripts/make-icon.mjs",
+    "lint": "npm run typecheck"
+  },
+  "devDependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.9.3",
+    "electron-builder": "^26.15.3",
+    "playwright-core": "^1.64.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "5.9",
+    "vite": "^7.3.7"
+  },
+  "build": {
+    "appId": "io.github.hauldm.app",
+    "productName": "Haul Download Manager",
+    "copyright": "Copyright (c) 2026 Haul Download Manager contributors",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/src/main/**/*",
+      "dist/src/shared/**/*",
+      "dist/renderer/**/*",
+      "build/icon.png",
+      "package.json",
+      "LICENSE",
+      "THIRD_PARTY_LICENSES.txt"
+    ],
+    "npmRebuild": false,
+    "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Haul Download Manager",
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh",
+      "artifactName": "Haul-Download-Manager-Setup-${version}-x64.${ext}"
+    },
+    "portable": {
+      "artifactName": "Haul-Download-Manager-${version}-x64-portable.${ext}"
+    }
+  }
+}

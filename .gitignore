@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+release/
+out/
+*.blockmap
+builder-debug.yml
+builder-effective-config.yaml
+
+# Test artifacts
+e2e-output/
+coverage/
+*.log
+
+# Local databases and app data (never commit download history)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.corrupt-*
+*.haulpart
+
+# Secrets and personal configuration
+.env
+.env.*
+*.pfx
+*.p12
+*.pem
+*.key
+.npmrc
+.vscode/
+.idea/
+.claude/
+*.local.json
+
+# OS clutter
+Thumbs.db
+Desktop.ini
+.DS_Store
