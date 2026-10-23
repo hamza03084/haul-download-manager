@@ -26,7 +26,8 @@ const partials = (dir: string) => fs.readdirSync(dir).filter((f) => f.endsWith('
 describe('basic downloads', () => {
   test('downloads a file, reports progress and finalizes it', async () => {
     const body = randomBody(2 * MB);
-    server.route('/basic/file.bin', { body, etag: '"v1"', delayMs: 5, chunkSize: 64 * 1024 });
+    // Slow enough (about 0.7 s) for a speed to be measured even on a fast machine: the meter needs 0.3 s.
+    server.route('/basic/file.bin', { body, etag: '"v1"', delayMs: 20, chunkSize: 64 * 1024 });
     const h = createHarness();
     const added = h.manager.add({ url: server.url('/basic/file.bin') });
     assert.equal(added.state, 'queued');
