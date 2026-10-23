@@ -12,8 +12,10 @@ export class SpeedMeter {
   sample(bytes: number): void {
     const t = this.now();
     const last = this.samples[this.samples.length - 1];
-    if (last && t - last.t < 100) {
-      last.bytes = bytes; // coalesce very frequent samples
+    // Very frequent samples are coalesced, but never into the first one: the rate is measured from
+    // it, and a fast download that arrives within its first 100 ms would otherwise show no speed.
+    if (last && this.samples.length > 1 && t - last.t < 100) {
+      last.bytes = bytes;
     } else {
       this.samples.push({ t, bytes });
     }

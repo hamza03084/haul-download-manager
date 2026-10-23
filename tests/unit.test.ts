@@ -111,6 +111,23 @@ test('SpeedMeter measures a steady rate and decays when stalled', () => {
   assert.ok(m.rate() < 100_000, `stalled rate ${m.rate()}`);
 });
 
+test('SpeedMeter reports a speed for a download that arrives in a burst (fast servers, CI runners)', () => {
+  let now = 1_000_000;
+  const m = new SpeedMeter(3000, () => now);
+  m.reset(0);
+  // 2 MB within 60 ms, as a local or very fast server delivers it.
+  for (let i = 1; i <= 32; i++) {
+    now += 2;
+    m.sample(i * 65536);
+  }
+  now += 300;
+  m.sample(32 * 65536);
+  assert.ok(m.rate() > 0, 'a speed is reported once enough time has passed');
+  now += 3500;
+  m.sample(32 * 65536);
+  assert.equal(m.rate(), 0, 'and it decays to zero while nothing arrives');
+});
+
 test('validateSettings enforces limits', () => {
   const dir = path.resolve('/downloads');
   // Settings saved by 1.0 have no yt-dlp location, by 1.1 no automatic-tools choice and by 1.2 none of
