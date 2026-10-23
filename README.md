@@ -314,7 +314,7 @@ src/main/          Electron main process, preload bridge, native messaging host,
 src/renderer/      React user interface
 src/shared/        Types and formatting shared by both sides
 tests/             Unit, integration, crash, power-cut and randomised tests, plus the controllable test server
-scripts/           End-to-end UI test, real-internet test, icon generator, license collector
+scripts/           End-to-end UI test, real-internet test, real-browser extension test, icon generator, license collector
 browser-extension/ Chrome/Edge extension: download capture and the right-click menu
 ```
 

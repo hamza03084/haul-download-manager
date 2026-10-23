@@ -17,9 +17,10 @@ All notable changes to Haul Download Manager are listed here. Versions follow [S
 
 ### Fixed
 - A video from a site that serves picture and sound in one stream showed "Downloading video (1 of 2)" and an estimate that counted a sound stream that does not exist.
+- A download that arrived within its first 100 milliseconds (a very fast server) showed no speed.
 
 ### Tests
-- Full results, including five bugs found and fixed before release, are in [docs/test-report-1.4.0.md](docs/test-report-1.4.0.md).
+- Full results, including nine bugs found and fixed before release, are in [docs/test-report-1.4.0.md](docs/test-report-1.4.0.md). New `scripts/browser-capture-test.mjs` drives a real Microsoft Edge with the extension loaded and checks that a download is taken over by Haul.
 - 35 new engine tests: planning and validating parts; several connections in flight; small files, no-range servers and the 1-connection setting staying single; ranges tried on servers that do not advertise them and the fallback when they ignore them; pause and resume of every part with If-Range; parts surviving a close and a simulated power cut (zeros past each checkpoint); checkpoints never ahead of the disk; `checkpointNow`; an older single-connection download continuing in parts; HTTP 429 back-off; a dropped part reconnecting; a changed file restarting; cancel and change link with parts; the shared speed limit; a damaged parts record; the Referer header; the crash test with 1 and 4 connections; the chaos test now alternates 1 and 2–4 connections; site detection and DRM refusal; Vimeo-style and generic-page probes; "best available"; the native messaging host itself (run for real through its .cmd, with Node standing in for Haul: ping, a captured download arriving as a haul:// link, the context-menu form, refused links and a refused extension), its framing, manifest and registry entries (under a test key). The end-to-end UI test covers the connections setting and card, a Vimeo link through the picker, "Try as video", and the native messaging host receiving a download from a (simulated) browser.
 
 ## [1.3.0] - 2026-10-23

@@ -39,7 +39,7 @@ See [Building from source](README.md#building-from-source) for all commands and 
 - The download engine (`src/main/engine/`) must stay free of Electron imports so it can be tested under plain Node.
 - Add or update tests for behaviour changes. Engine changes should come with a test against the controllable server in `tests/helpers/testServer.ts`.
 - Run `npm run typecheck`, `npm test` and, for UI changes, `npm run e2e` before submitting. CI runs the same checks plus a packaged build.
-- For changes to the transfer, resume or recovery code, also run the randomised soak (PowerShell: `$env:HAUL_CHAOS_SEEDS=30; npm test`) and, if you can spare ~400 MB of bandwidth, `node scripts/live-test.mjs --exe <packaged exe>` against real servers.
+- For changes to the transfer, resume or recovery code, also run the randomised soak (PowerShell: `$env:HAUL_CHAOS_SEEDS=30; npm test`) and, if you can spare ~400 MB of bandwidth, `node scripts/live-test.mjs --exe <packaged exe>` against real servers. For changes to the browser extension or the native messaging host, run `node scripts/browser-capture-test.mjs --exe <packaged exe>` (drives a real Microsoft Edge with the extension loaded).
 - Never log full URLs: use `redactUrl()` / `redactText()` from `src/main/engine/urls.ts`.
 - If you add a dependency that ships inside the app, add it to `SHIPPED` in `scripts/licenses.mjs` and make sure its license is compatible with MIT.
 
