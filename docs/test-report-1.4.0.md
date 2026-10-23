@@ -59,11 +59,19 @@ Both are **not code-signed**.
 | site: the picker opens for an Internet Archive link and lists its sizes | **PASS** | "Internet Archive", lookup took 8 s |
 | site: the 720p AVI (preselected on the first run) is downloaded complete under its real name | **PASS** | `Big Buck Bunny.avi`, 332,243,668 bytes (the file's full size on archive.org); the card was renamed from the provisional `.mp4` to `.avi`, which the first version of the live script did not follow (script fixed) |
 | site: the 360p MP4 is a complete file with picture and sound that decodes cleanly | **PASS** | `Big Buck Bunny.mp4` 59.0 MB; H.264 640×360, AAC, 596.5 s; every frame decoded in 7 s, no errors |
-| youtube: real yt-dlp scenario | **NOT TESTED** | YouTube's "not a bot" check refused every lookup during the session (see below) |
+| youtube: quality picker lists the real formats | **PASS** | 2160p60 (4K), 1440p60 (2K), 1080p60, 720p60, 480p, 360p, 240p, 144p; lookup took 20 s (run later in the session, once YouTube's "not a bot" check had lifted) |
+| youtube: partial video survives a hard kill of the app | **PASS** | killed at 31 %, 59.0 MB in `.part` files |
+| youtube: pause stops yt-dlp (partial files stop growing) | **PASS** | 70.9 MB on disk, unchanged after 4 s |
+| youtube: continued from partial data after the kill and after pause (not restarted) | **PASS** | resumed at 59.0 MB and 70.9 MB |
+| youtube: 720p60 video is a valid H.264 + AAC MP4 of the full length | **PASS** | 153.7 MB; H.264 1280×720, AAC, 634.6 s |
+| youtube: every frame of the resumed 720p video decodes without errors | **PASS** | decoded in 41 s, no errors |
+| youtube: 1080p60 video (~256 MB) is complete and decodes cleanly | **PASS** | 255.9 MB; H.264 1920×1080, AAC, 634.6 s; decoded in 107 s, no errors |
+| youtube: audio-only MP3 + thumbnail | **PASS** | 17.2 MB MP3, 634.6 s, thumbnail 0.1 MB |
+| youtube: main-process peak memory | INFO | 112.9 MB |
 
 ## Not tested
 
-- **YouTube with the real yt-dlp**: during this test session YouTube answered every lookup with its "Sign in to confirm you're not a bot" check (also when running yt-dlp by hand), so the YouTube scenario of the live test could not run. Haul shows the explained message in the picker. Nothing in the YouTube pipeline changed in 1.4.0 apart from the probe summary (covered by the fixture tests); it was last exercised live for 1.2.0.
+- **YouTube's "not a bot" check**: for about an hour of this session YouTube refused every lookup from this network (also when running yt-dlp by hand); Haul showed the explained message in the picker. The live YouTube scenario was run once the check had lifted and passed in full (table above). Nothing can be done about the check itself.
 - **Vimeo with the real yt-dlp**: Vimeo's web player now requires a signed-in account for yt-dlp ("The web client only works when logged-in"), so a Vimeo download could not be verified live; Haul reports it as needing a signed-in account. The Internet Archive was used instead for the live "other site" scenario.
 - The extension inside **Chrome** (it was driven for real in Edge, see above). To check by hand: open `chrome://extensions`, turn on Developer mode, **Load unpacked** → the `browser-extension` folder; start Haul once (it registers the host); click any download link of a type on the extension's list (for example a `.zip`) and watch it appear in Haul while it disappears from Chrome's download list.
 - The extension's **popup** (file-type list, size threshold, "every download", off switch) was reviewed but not driven by a test; the capture itself used the default list.
