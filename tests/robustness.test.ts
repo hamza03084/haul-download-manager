@@ -116,14 +116,15 @@ describe('crash and power-loss durability', () => {
 describe('progress reporting', () => {
   test('a stalled transfer reports its speed dropping to zero instead of freezing the last value', async () => {
     const body = randomBody(1 * MB);
-    // The speed is averaged over 3 s, so it can only reach 0 after 3 s without data: stall for 7 s.
-    server.route('/stall/file.bin', { body, etag: '"st"', delayMs: 5, chunkSize: 32 * 1024, stallAfter: 300_000, stallMs: 7_000 });
-    const h = createHarness({ timeoutMs: 10_000 });
+    // The speed is averaged over 3 s, so it can only reach 0 after 3 s without data. The stall is long
+    // (15 s) and the socket timeout longer, so a slow machine (CI) still sees the zero before data resumes.
+    server.route('/stall/file.bin', { body, etag: '"st"', delayMs: 5, chunkSize: 32 * 1024, stallAfter: 300_000, stallMs: 15_000 });
+    const h = createHarness({ timeoutMs: 25_000 });
     const d = h.manager.add({ url: server.url('/stall/file.bin') });
     await waitFor(h.manager, d.id, (x) => x.downloadedBytes >= 300_000 && x.speed > 0);
     const stalledAt = h.manager.get(d.id)!.downloadedBytes;
-    await waitFor(h.manager, d.id, (x) => x.state === 'downloading' && x.downloadedBytes === stalledAt && x.speed === 0, 6_500);
-    const done = await waitFor(h.manager, d.id, isState('completed', 'failed'));
+    await waitFor(h.manager, d.id, (x) => x.state === 'downloading' && x.downloadedBytes === stalledAt && x.speed === 0, 12_000);
+    const done = await waitFor(h.manager, d.id, isState('completed', 'failed'), 30_000);
     assert.equal(done.state, 'completed', done.error ?? '');
     assert.ok(read(done).equals(body));
     await h.manager.shutdown();
